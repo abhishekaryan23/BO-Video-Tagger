@@ -1,0 +1,5 @@
+opencv-python
+huggingface-hub
+llama-cpp-python
+tqdm
+psutil

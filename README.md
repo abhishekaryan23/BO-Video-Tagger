@@ -18,9 +18,9 @@
 ## Installation
 
 1. **Install Dependencies**
-   The script checks for dependencies on launch, but you can pre-install them:
+   The script checks for dependencies on launch, but you can pre-install them using the generated requirements file:
    ```bash
-   pip install opencv-python huggingface-hub llama-cpp-python tqdm psutil
+   pip install -r requirements.txt
    ```
 
    **🍎 MacOS / Apple Silicon Users (M1/M2/M3)**
