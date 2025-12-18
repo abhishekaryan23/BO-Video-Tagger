@@ -1,4 +1,6 @@
+#!/usr/bin/env python3
 import os
+__version__ = "2.0.0"
 import sys
 import json
 import time
