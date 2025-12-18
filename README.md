@@ -1,87 +1,135 @@
+<p align="center">
+  <img src="assets/logo.png" alt="BO Video Tagger Logo" width="200"/>
+</p>
+
 # BO Video Tagger V2
 
-## Overview
-**BO Video Tagger V2** (`tag_my_videos_v2.py`) is an automated, local-first video analysis tool that uses the **SmolVLM2** Vision Language Model to generate searchable tags and description summaries for your video files. It processes videos locally on your machine, ensuring privacy and eliminating the need for cloud APIs.
+**BO Video Tagger** is an automated, local-first video analysis tool. It uses the **SmolVLM2** Vision Language Model to "watch" your videos and generate searchable tags, detailed descriptions, and keywords.
 
-## Features
-- 🚀 **Local AI Processing**: Uses `llama.cpp` to run efficient GGUF models locally.
-- 👁️ **Vision Enabled**: Downloads and uses the official multimodal projector for accurate video understanding.
-- ⚙️ **Adaptive Tiers**: Two processing modes (Smart, Super) to balance quality vs. resources.
-- 🛡️ **System Safety**: Built-in RAM checks to prevent system crashes before loading models.
-- 📦 **Auto-Management**: Automatically downloads the specific model weights from the `ggml-org` repository.
-- 🐛 **Debug Mode**: Verify what the AI "sees" by saving extracted frames to disk.
+---
 
-## Prerequisites
-- **Python**: Version 3.8 or higher.
-- **RAM**: Minimum ~2.5GB free for 'Smart' mode, up to ~4.0GB+ for 'Super' mode.
-- **Storage**: ~3GB - 5GB of disk space for model weights.
+## 🌟 Features
+-   **Local Intelligence**: Runs 100% offline (Privacy First).
+-   **Vision AI**: Uses `mmproj` projectors to understand video frames visually.
+-   **Mapped Drive Support**: Works seamlessly with Google Drive, SMB Shares, and NAS (`Z:\` or `/Volumes/`).
+-   **Adaptive Tiers**: Choose between **Fast (Smart)** or **High-Precision (Super)** analysis.
+-   **Dynamic Output**: Auto-organizes results with timestamped filenames.
 
-## Installation
+---
 
-1. **Install Dependencies**
-   The script checks for dependencies on launch, but you can pre-install them using the generated requirements file:
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Performance vs. Protocol
+Manual tagging wastes human capital. Cloud APIs rent you back your own processing power while reading your data. **BO Video Tagger** runs on your metal, costs nothing, and outpaces the cloud.
 
-   **🍎 MacOS / Apple Silicon Users (M1/M2/M3)**
-   To enable GPU acceleration (Metal) for much faster processing, install `llama-cpp-python` with the following command:
-   ```bash
-   CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python --upgrade --force-reinstall --no-cache-dir
-   ```
+| Metric | Human | Cloud API | BO Video Tagger 🚀 |
+| :--- | :--- | :--- | :--- |
+| **Throughput** | 2 mins / video | Variable (Latency dependent) | **~4 seconds / video** |
+| **Burn Rate** | High (Time/Labor) | ~$50 per 1k videos | **$0.00** |
+| **Security** | N/A | Server-side exposure | **Local / Offline** |
+| **Volume** | 10 videos / hour | Rate Limited | **900+ videos / hour** |
 
-## Usage
+<p align="center">
+  <img src="assets/performance_chart.png" alt="Performance Comparison Chart" width="80%"/>
+</p>
 
-### Basic Usage
-Run the script and provide the path to your folder containing videos:
+---
+
+## 🛠️ Prerequisites
+*   **OS**: macOS (Apple Silicon recommended) or Windows (with C++ Build Tools).
+*   **Python**: 3.10+.
+*   **RAM**: ~4GB minimum.
+
+---
+
+## 📦 Installation (Strict Guide)
+
+To avoid dependency conflicts, **always use a Virtual Environment**.
+
+### 🍎 macOS / Linux
+Open Terminal and run:
 ```bash
-python tag_my_videos_v2.py /path/to/your/video_folder
-```
-This runs in **Smart (Default)** mode.
+# 1. Create Virtual Env
+python3 -m venv venv
 
-### Command Line Arguments
-You can control the behavior using flags:
+# 2. Activate it
+source venv/bin/activate
+
+# 3. Install Dependencies (with Apple Metal Acceleration)
+CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python --upgrade --force-reinstall --no-cache-dir
+pip install -r requirements.txt
+```
+
+### 🪟 Windows
+Open PowerShell/CMD and run:
+```bash
+# 1. Create Virtual Env
+python -m venv venv
+
+# 2. Activate it
+.\venv\Scripts\activate
+
+# 3. Install Dependencies
+pip install -r requirements.txt
+```
+
+---
+
+## 🚀 Usage
+
+### 1. Basic Run (Local Folder)
+```bash
+# Ensure venv is active!
+python tag_my_videos_v2.py "/Users/me/Movies/Vacation"
+```
+
+### 2. Network / Cloud Drives ☁️
+You can process videos directly from Google Drive, Dropbox, or Mapped Network Shares.
+*   **macOS**: Paths often look like `/Users/name/Library/CloudStorage/...` or `/Volumes/Public/...`
+*   **Windows**: Paths look like `Z:\Videos` or `\\Server\Share`.
+
+**Performance Note**: Processing over WiFi might be slower. The script extracts 5 frames per video.
 
 ```bash
-# Run in 'Super' mode for maximum accuracy
-python tag_my_videos_v2.py ./vacation_clips --mode super
-
-# Run with Debugging enabled (saves frames to ./debug_frames/)
-python tag_my_videos_v2.py ./vacation_clips --debug
+# Example: Running on Google Drive
+python tag_my_videos_v2.py "/Users/abhishekrai/Library/CloudStorage/GoogleDrive/My Drive/Videos"
 ```
 
-### Processing Modes
-| Mode | RAM Req | Model Type | Description |
-|------|---------|------------|-------------|
-| **Smart** | ~2.5 GB | Q8_0 | **Default**. High quality balanced with speed. (Repo: `ggml-org`) |
-| **Super** | ~4.0 GB | F16 | Lossless (Full Precision). Highest accuracy, requires more RAM. |
+### 3. Advanced Options
+Control precision, speed, and output location.
 
-### Compatibility Note (Google Drive / Cloud)
-The script works with mounted Cloud Drives (like Google Drive for Desktop).
-However, if streaming is slow, the script might read blank frames.
-**Tip:** Use the `--debug` flag to check if the script is successfully extracting images from your cloud drive. If the images in `debug_frames` are valid, the AI will work.
+| Flag | Description | Example |
+| :--- | :--- | :--- |
+| `--mode` | **smart** (Q8, Fast) or **super** (F16, Detailed) | `--mode super` |
+| `--interval` | Seconds between frame checks (Default: 10s) | `--interval 5` |
+| `--output` | Custom save folder or filename | `--output ./results` |
+| `--debug` | Save analyzed frames to `debug_frames/` | `--debug` |
 
-## Output
-The script generates a `video_tags.jsonl` (JSON Lines) file. Each line is a self-contained JSON object, which is generally safer and faster for large datasets.
+**Full Power Run:**
+```bash
+python tag_my_videos_v2.py "/Volumes/NAS/Footage" --mode super --interval 5 --output ./nas_analysis.jsonl
+```
 
-**Example Output (One Line):**
+---
+
+## 📊 Output
+Files are saved as **JSONL (JSON Lines)** for safety and speed.
+Default name: `{Folder}_video_tags_{Date}.jsonl`
+
+**Example Content:**
 ```json
-{"file": "beach.mp4", "path": "/videos/beach.mp4", "analysis": "Sunny beach...", "tier_used": "SmolVLM...", "processing_time_sec": 12.5}
-```
-[
-  {
-    "file": "beach_trip.mp4",
-    "path": "/Users/videos/beach_trip.mp4",
-    "analysis": "The video shows a sunny beach with waves crashing gently on the shore. People are walking in the distance.\n\nKeywords: beach, ocean, waves, sunny, relaxation",
-    "tier_used": "SmolVLM2-500M-Video-Instruct-Q8_0.gguf",
-    "processing_time": "12.42s"
-  }
-]
+{"file": "clip_01.mp4", "analysis": "A golden retriever playing tag...", "keywords": ["dog", "park", "sunny"]}
+{"file": "clip_02.mp4", "analysis": "Screen recording of VS Code...", "keywords": ["coding", "python", "ide"]}
 ```
 
-## Troubleshooting
-- **Loops/Repetitive Text**: The updated V2 script uses valid vision projectors to solve this. Ensure you have internet access on the first run to download the new `mmproj` files.
-- **"Missing dependencies" error**: Run `pip install -r requirements.txt`.
-- **System crash / Out of Memory**: 
-    - Ensure you have enough free RAM.
-    - Close other memory-intensive applications (Chrome, Photoshop, etc.).
+---
+
+## ❓ Troubleshooting
+
+| Issue | Solution |
+| :--- | :--- |
+| **"Module not found..."** | Did you activate venv? Run `source venv/bin/activate`. |
+| **Slow Processing** | If on Network Drive, try `--interval 20`. Or copy files locally. |
+| **System Crash / OOM** | Use `--mode smart`. Close Chrome/Photoshop. |
+| **Blank/Black Analysis** | Run with `--debug`. Check `debug_frames/` to see if video is readable. |
+
+---
+*Powered by SmolVLM2 & Llama.cpp*

@@ -19,7 +19,9 @@ from tqdm import tqdm
 REPO_ID = "ggml-org/SmolVLM2-500M-Video-Instruct-GGUF"
 CONTEXT_SIZE = 8192
 DEFAULT_DEBUG_DIR = "debug_frames"
-OUTPUT_FILE = "video_tags.jsonl"
+REPO_ID = "ggml-org/SmolVLM2-500M-Video-Instruct-GGUF"
+CONTEXT_SIZE = 8192
+DEFAULT_DEBUG_DIR = "debug_frames"
 
 # Setup Logging
 logging.basicConfig(
@@ -211,6 +213,8 @@ def main():
     parser = argparse.ArgumentParser(description="Video Tagger V2 (Professional)")
     parser.add_argument("folder", help="Path to video folder")
     parser.add_argument("--mode", choices=MODEL_TIERS.keys(), default="smart", help="Processing mode")
+    parser.add_argument("--interval", type=int, default=10, help="Frame extraction interval in seconds (default: 10)")
+    parser.add_argument("--output", help="Custom output directory or filename")
     parser.add_argument("--debug", action="store_true", help="Save debug frames")
     args = parser.parse_args()
 
@@ -219,7 +223,7 @@ def main():
         sys.exit(1)
 
     # Initialize Tagger
-    tagger = VideoTagger(tier=args.mode, debug=args.debug)
+    tagger = VideoTagger(tier=args.mode, debug=args.debug, interval=args.interval)
     tagger.prepare()
 
     # Find Videos
@@ -233,12 +237,31 @@ def main():
         logger.warning("No video files found.")
         sys.exit(0)
 
-    logger.info(f"Processing {len(video_files)} videos to '{OUTPUT_FILE}'...")
+    logger.info(f"Processing {len(video_files)} videos...")
+
+    # Determine Output Path
+    timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    folder_name = os.path.basename(os.path.normpath(args.folder))
+    # User Request: "{Folder}_video_tags_{Date}.jsonl"
+    default_filename = f"{folder_name}_video_tags_{timestamp}.jsonl"
+
+    if args.output:
+        if os.path.isdir(args.output):
+             # User gave a directory: /path/to/save/ -> /path/to/save/Folder_video_tags_Date.jsonl
+            output_path = os.path.join(args.output, default_filename)
+        else:
+            # User gave a specific file: /path/to/my_file.jsonl
+            output_path = args.output
+    else:
+        # Default: Save in CWD with dynamic name
+        output_path = default_filename
+
+    logger.info(f"💾 Saving results to: {output_path}")
     
     # Process Loop
     with tqdm(total=len(video_files), unit="vid") as pbar:
         # Open in append mode (Line-Delimited JSON)
-        with open(OUTPUT_FILE, 'a') as f:
+        with open(output_path, 'a') as f:
             for vid in video_files:
                 result = tagger.process_video(vid)
                 
@@ -249,7 +272,7 @@ def main():
                 pbar.set_postfix(file=os.path.basename(vid)[:10])
                 pbar.update(1)
 
-    logger.info(f"Done! Results saved to {OUTPUT_FILE}")
+    logger.info(f"Done! Results saved to {output_path}")
 
 if __name__ == "__main__":
     main()
