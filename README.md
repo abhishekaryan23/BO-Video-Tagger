@@ -78,7 +78,7 @@ pip install -r requirements.txt
 ### 1. Basic Run (Local Folder)
 ```bash
 # Ensure venv is active!
-python tag_my_videos_v2.py "/Users/me/Movies/Vacation"
+python bo_video_tagger.py "/Users/me/Movies/Vacation"
 ```
 
 ### 2. Network / Cloud Drives ☁️
@@ -90,7 +90,7 @@ You can process videos directly from Google Drive, Dropbox, or Mapped Network Sh
 
 ```bash
 # Example: Running on Google Drive
-python tag_my_videos_v2.py "/Users/abhishekrai/Library/CloudStorage/GoogleDrive/My Drive/Videos"
+python bo_video_tagger.py "/Users/abhishekrai/Library/CloudStorage/GoogleDrive/My Drive/Videos"
 ```
 
 ### 3. Advanced Options
@@ -105,7 +105,7 @@ Control precision, speed, and output location.
 
 **Full Power Run:**
 ```bash
-python tag_my_videos_v2.py "/Volumes/NAS/Footage" --mode super --interval 5 --output ./nas_analysis.jsonl
+python bo_video_tagger.py "/Volumes/NAS/Footage" --mode super --interval 5 --output ./nas_analysis.jsonl
 ```
 
 ---
