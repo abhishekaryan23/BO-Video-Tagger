@@ -8,3 +8,4 @@ models/
 video_tags.json
 video_tags.jsonl
 code_review.md
+debug_frames/
