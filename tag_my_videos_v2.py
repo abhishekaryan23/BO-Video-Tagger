@@ -4,142 +4,130 @@ import json
 import time
 import argparse
 import logging
-from typing import List, Dict, Any
-
-# --- Dependency Check & Auto-Install Recommendation ---
-required_packages = {
-    "cv2": "opencv-python",
-    "huggingface_hub": "huggingface-hub",
-    "llama_cpp": "llama-cpp-python",
-    "tqdm": "tqdm",
-    "psutil": "psutil"  # Added for system checks
-}
-
-missing_pkgs = []
-for import_name, install_name in required_packages.items():
-    try:
-        __import__(import_name)
-    except ImportError:
-        missing_pkgs.append(install_name)
-
-if missing_pkgs:
-    print(f"❌ Missing dependencies. Please run:")
-    print(f"pip install {' '.join(missing_pkgs)}")
-    sys.exit(1)
-
-# Imports after check
+import psutil
 import cv2
 import base64
-import psutil
+import numpy as np
+from dataclasses import dataclass
+from typing import List, Dict, Any, Optional
 from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
+from llama_cpp.llama_chat_format import Llava15ChatHandler
 from tqdm import tqdm
 
-# --- Configuration & Tiers ---
-REPO_ID = "mradermacher/SmolVLM2-500M-Video-Instruct-GGUF"
-
-# Dictionary mapping friendly names to specific GGUF files and RAM requirements
-MODEL_TIERS = {
-    "normal": {
-        "filename": "SmolVLM2-500M-Video-Instruct.Q4_K_M.gguf",
-        "desc": "Fastest (Q4 Quantization)",
-        "min_ram_gb": 1.5
-    },
-    "smart": {
-        "filename": "SmolVLM2-500M-Video-Instruct.Q8_0.gguf",
-        "desc": "Balanced (Q8 Quantization)",
-        "min_ram_gb": 2.0
-    },
-    "super": {
-        "filename": "SmolVLM2-500M-Video-Instruct.f16.gguf",
-        "desc": "Max Precision (F16 - Lossless)",
-        "min_ram_gb": 3.0
-    }
-}
-
-CONTEXT_SIZE = 8192  # Video models need large context for multiple frames
+# --- Configuration Constants ---
+REPO_ID = "ggml-org/SmolVLM2-500M-Video-Instruct-GGUF"
+CONTEXT_SIZE = 8192
+DEFAULT_DEBUG_DIR = "debug_frames"
+OUTPUT_FILE = "video_tags.jsonl"
 
 # Setup Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger("VideoTagger")
 
-def check_system_resources(tier: str) -> bool:
-    """
-    Checks if the system has enough RAM to run the selected tier.
-    Returns True if safe, False if risky (user can override).
-    """
-    # 1. Get System Stats
-    mem = psutil.virtual_memory()
-    total_ram_gb = mem.total / (1024 ** 3)
-    available_ram_gb = mem.available / (1024 ** 3)
-    
-    req_ram = MODEL_TIERS[tier]['min_ram_gb']
-    
-    print(f"\n🖥️  System Check for '{tier.upper()}' mode:")
-    print(f"   • Required RAM: ~{req_ram} GB")
-    print(f"   • Available RAM: {available_ram_gb:.2f} GB (Total: {total_ram_gb:.2f} GB)")
+@dataclass
+class ModelConfig:
+    filename: str
+    mmproj: str
+    desc: str
+    min_ram_gb: float
 
-    # 2. Heuristic Check
-    if available_ram_gb < req_ram:
-        print(f"⚠️  WARNING: You have {available_ram_gb:.2f} GB available, but this mode needs {req_ram} GB.")
-        print("   The system might swap (slow) or crash.")
-        response = input("   Do you want to continue anyway? (y/n): ").lower()
-        return response == 'y'
-    
-    print("✅ System resources look good.")
-    return True
+MODEL_TIERS = {
+    "smart": ModelConfig(
+        filename="SmolVLM2-500M-Video-Instruct-Q8_0.gguf",
+        mmproj="mmproj-SmolVLM2-500M-Video-Instruct-Q8_0.gguf",
+        desc="Balanced (Q8 Quantization)",
+        min_ram_gb=2.5
+    ),
+    "super": ModelConfig(
+        filename="SmolVLM2-500M-Video-Instruct-f16.gguf",
+        mmproj="mmproj-SmolVLM2-500M-Video-Instruct-f16.gguf",
+        desc="Max Precision (F16 - Lossless)",
+        min_ram_gb=4.0
+    )
+}
 
-class BRollTagger:
-    def __init__(self, tier: str = "normal", interval: int = 10):
+class VideoTagger:
+    def __init__(self, tier: str = "smart", debug: bool = False, interval: int = 10):
         self.interval = interval
-        self.tier_config = MODEL_TIERS[tier]
-        self.filename = self.tier_config['filename']
+        self.debug = debug
+        self.tier_name = tier
         
-        # 1. Model Download Path
-        # We store models in a local 'models' folder to keep things tidy
+        if tier not in MODEL_TIERS:
+            raise ValueError(f"Invalid tier: {tier}. Choices: {list(MODEL_TIERS.keys())}")
+            
+        self.config = MODEL_TIERS[tier]
         self.model_dir = os.path.join(os.getcwd(), "models")
-        os.makedirs(self.model_dir, exist_ok=True)
-        self.model_path = os.path.join(self.model_dir, self.filename)
+        self.debug_dir = os.path.join(os.getcwd(), DEFAULT_DEBUG_DIR)
+        
+        self.llm: Optional[Llama] = None
+        self.model_path = os.path.join(self.model_dir, self.config.filename)
+        self.mmproj_path = os.path.join(self.model_dir, self.config.mmproj)
 
-        # 2. Ensure Model Exists
-        if not os.path.exists(self.model_path):
-            print(f"\n⬇️  Downloading {tier.upper()} model ({self.filename})...")
-            try:
-                # Download to specific path
-                self.model_path = hf_hub_download(
-                    repo_id=REPO_ID, 
-                    filename=self.filename,
+    def prepare(self):
+        """Downloads models and initializes the inference engine."""
+        self._setup_directories()
+        self._download_models()
+        self._load_engine()
+
+    def _setup_directories(self):
+        os.makedirs(self.model_dir, exist_ok=True)
+        if self.debug:
+            os.makedirs(self.debug_dir, exist_ok=True)
+            logger.info(f"🐛 Debug mode ON. Frames: {self.debug_dir}")
+
+    def _download_models(self):
+        """Ensures both model and projector exist."""
+        if os.path.exists(self.model_path) and os.path.exists(self.mmproj_path):
+            return
+
+        logger.info(f"⬇️  Downloading {self.tier_name.upper()} model files from {REPO_ID}...")
+        try:
+            for fname in [self.config.filename, self.config.mmproj]:
+                hf_hub_download(
+                    repo_id=REPO_ID,
+                    filename=fname,
                     local_dir=self.model_dir,
                     local_dir_use_symlinks=False
                 )
-                print(f"✅ Download complete: {self.model_path}")
-            except Exception as e:
-                logger.error(f"Failed to download model: {e}")
-                sys.exit(1)
+            logger.info("✅ Download complete.")
+        except Exception as e:
+            logger.exception("Failed to download model files.")
+            sys.exit(1)
 
-        # 3. Load Model
-        print(f"🤖 Loading {tier.upper()} Neural Network...")
+    def _load_engine(self):
+        """Loads Llama with Vision Handler."""
+        logger.info(f"🤖 Loading {self.tier_name.upper()} Engine (Vision Enabled)...")
         try:
+            chat_handler = Llava15ChatHandler(clip_model_path=self.mmproj_path)
             self.llm = Llama(
                 model_path=self.model_path,
+                chat_handler=chat_handler,
                 n_ctx=CONTEXT_SIZE,
-                n_gpu_layers=-1, # Auto-offload to GPU if available
+                n_gpu_layers=-1, # Auto-offload
                 verbose=False
             )
         except Exception as e:
-            logger.error(f"Failed to initialize Llama: {e}")
+            logger.exception("Failed to initialize Inference Engine.")
             sys.exit(1)
 
     def extract_frames(self, video_path: str, max_frames: int = 5) -> List[str]:
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
+            logger.warning(f"Could not open video: {video_path}")
             return []
 
         fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_interval = int(fps * self.interval) if fps > 0 else 30
+        # Fallback to 30fps if metadata is broken, typical for some web streams
+        frame_interval = int(fps * self.interval) if fps > 0 else 300 
         
         base64_frames = []
         count = 0
+        extracted_count = 0
         
         while cap.isOpened() and len(base64_frames) < max_frames:
             ret, frame = cap.read()
@@ -147,103 +135,121 @@ class BRollTagger:
                 break
             
             if count % frame_interval == 0:
-                # Resize to 384x384 (SmolVLM standard sweet spot)
+                # Validation: Skip empty/black frames
+                if np.var(frame) < 10:
+                    count += 1
+                    continue
+
                 resized = cv2.resize(frame, (384, 384))
+                
+                if self.debug:
+                    debug_name = f"{os.path.basename(video_path)}_{extracted_count}.jpg"
+                    cv2.imwrite(os.path.join(self.debug_dir, debug_name), resized)
+
                 _, buffer = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
                 b64_str = base64.b64encode(buffer).decode('utf-8')
                 base64_frames.append(f"data:image/jpeg;base64,{b64_str}")
+                extracted_count += 1
             
             count += 1
             
         cap.release()
         return base64_frames
 
-    def tag_video(self, video_path: str) -> Dict[str, Any]:
+    def process_video(self, video_path: str) -> Dict[str, Any]:
+        """Runs the VLM on a single video file."""
+        if not self.llm:
+            raise RuntimeError("Engine not loaded. Call prepare() first.")
+
         start_time = time.time()
         try:
             frames = self.extract_frames(video_path)
             if not frames:
-                return {"file": os.path.basename(video_path), "error": "No video stream found"}
+                return {"file": os.path.basename(video_path), "error": "No valid frames extracted"}
 
-            # Prompt Construction
             content = [{"type": "image_url", "image_url": {"url": img}} for img in frames]
             content.append({
                 "type": "text", 
-                "text": "Describe this video for a search engine. Provide 5 keywords and a 1-sentence summary. Format: Keywords: [a, b, c], Summary: [text]"
+                "text": "Describe the content of this video in detail. Then provide 5 keywords that summarize it."
             })
 
             response = self.llm.create_chat_completion(
                 messages=[{"role": "user", "content": content}],
-                max_tokens=150,
-                temperature=0.1
+                max_tokens=256,
+                temperature=0.6,
+                repeat_penalty=1.1
             )
             
             return {
                 "file": os.path.basename(video_path),
                 "path": video_path,
                 "analysis": response['choices'][0]['message']['content'],
-                "tier_used": self.filename,
-                "processing_time": f"{time.time() - start_time:.2f}s"
+                "tier_used": self.config.filename,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "processing_time_sec": round(time.time() - start_time, 2)
             }
 
         except Exception as e:
+            logger.exception(f"Error processing {video_path}")
             return {"file": os.path.basename(video_path), "error": str(e)}
 
-def select_mode():
-    print("\nSelect Processing Mode:")
-    print("1. [Normal] - Fast, Low RAM (Q4_K_M) [Default]")
-    print("2. [Smart]  - Better Detail (Q8_0)")
-    print("3. [Super]  - Max Precision (F16) - *High RAM Required*")
+def check_system_resources(tier: str) -> bool:
+    mem = psutil.virtual_memory()
+    available_gb = mem.available / (1024 ** 3)
+    req_gb = MODEL_TIERS[tier].min_ram_gb
     
-    choice = input("Enter choice (1-3): ").strip()
+    logger.info(f"System Check ({tier.upper()}): {available_gb:.2f}GB Available / {req_gb}GB Required")
     
-    if choice == "2": return "smart"
-    if choice == "3": return "super"
-    return "normal"
+    if available_gb < req_gb:
+        print(f"⚠️  WARNING: Low Memory. Required: {req_gb}GB, Available: {available_gb:.2f}GB")
+        if sys.stdin.isatty():
+             return input("Continue anyway? (y/n): ").strip().lower() == 'y'
+        return False
+    return True
 
 def main():
-    parser = argparse.ArgumentParser(description="BO Video Tagger V2")
+    parser = argparse.ArgumentParser(description="Video Tagger V2 (Professional)")
     parser.add_argument("folder", help="Path to video folder")
-    parser.add_argument("--mode", choices=["normal", "smart", "super"], help="Override interactive mode selection")
+    parser.add_argument("--mode", choices=MODEL_TIERS.keys(), default="smart", help="Processing mode")
+    parser.add_argument("--debug", action="store_true", help="Save debug frames")
     args = parser.parse_args()
 
-    # 1. Mode Selection
-    mode = args.mode if args.mode else select_mode()
-    
-    # 2. System Check
-    if not check_system_resources(mode):
-        print("❌ Aborted by user due to system requirements.")
-        return
+    if not check_system_resources(args.mode):
+        logger.error("Aborted due to system requirements.")
+        sys.exit(1)
 
-    # 3. Initialize
-    tagger = BRollTagger(tier=mode)
-    
-    # 4. Scan & Process
+    # Initialize Tagger
+    tagger = VideoTagger(tier=args.mode, debug=args.debug)
+    tagger.prepare()
+
+    # Find Videos
+    valid_exts = ('.mp4', '.mov', '.avi', '.mkv', '.webm')
     video_files = [
         os.path.join(args.folder, f) for f in os.listdir(args.folder) 
-        if f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv'))
+        if f.lower().endswith(valid_exts)
     ]
     
     if not video_files:
-        print("❌ No video files found.")
-        return
+        logger.warning("No video files found.")
+        sys.exit(0)
 
-    print(f"\n📂 Processing {len(video_files)} videos in '{mode.upper()}' mode...")
-    results = []
+    logger.info(f"Processing {len(video_files)} videos to '{OUTPUT_FILE}'...")
     
+    # Process Loop
     with tqdm(total=len(video_files), unit="vid") as pbar:
-        for vid in video_files:
-            res = tagger.tag_video(vid)
-            results.append(res)
-            
-            # Atomic Write (Prevents corruption)
-            with open("video_tags.json", 'w') as f:
-                json.dump(results, f, indent=2)
-            
-            pbar.set_postfix(file=os.path.basename(vid)[:10])
-            pbar.update(1)
+        # Open in append mode (Line-Delimited JSON)
+        with open(OUTPUT_FILE, 'a') as f:
+            for vid in video_files:
+                result = tagger.process_video(vid)
+                
+                # O(1) Write
+                f.write(json.dumps(result) + "\n")
+                f.flush() # Ensure it hits disk immediately
+                
+                pbar.set_postfix(file=os.path.basename(vid)[:10])
+                pbar.update(1)
 
-    print("\n✅ Done! Check 'video_tags.json' for results.")
+    logger.info(f"Done! Results saved to {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     main()

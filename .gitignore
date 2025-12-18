@@ -6,3 +6,5 @@ __pycache__/
 venv/
 models/
 video_tags.json
+video_tags.jsonl
+code_review.md

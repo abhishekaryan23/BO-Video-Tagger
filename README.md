@@ -1,19 +1,20 @@
 # BO Video Tagger V2
 
 ## Overview
-**BO Video Tagger V2** (`tag_my_videos_v2.py`) is an automated, local-first video analysis tool that uses the **SmolVLM2** Vision Language Model to generate searchable tags and summaries for your video files. It processes videos locally on your machine, ensuring privacy and eliminating the need for cloud APIs.
+**BO Video Tagger V2** (`tag_my_videos_v2.py`) is an automated, local-first video analysis tool that uses the **SmolVLM2** Vision Language Model to generate searchable tags and description summaries for your video files. It processes videos locally on your machine, ensuring privacy and eliminating the need for cloud APIs.
 
 ## Features
 - 🚀 **Local AI Processing**: Uses `llama.cpp` to run efficient GGUF models locally.
-- ⚙️ **Adaptive Tiers**: Three processing modes (Normal, Smart, Super) to balance speed vs. accuracy.
+- 👁️ **Vision Enabled**: Downloads and uses the official multimodal projector for accurate video understanding.
+- ⚙️ **Adaptive Tiers**: Two processing modes (Smart, Super) to balance quality vs. resources.
 - 🛡️ **System Safety**: Built-in RAM checks to prevent system crashes before loading models.
-- 📦 **Auto-Management**: Automatically downloads the necessary specific model weights from HuggingFace.
-- 💾 **Resume-Safe**: Atomically updates `video_tags.json` after every video, so you don't lose progress if interrupted.
+- 📦 **Auto-Management**: Automatically downloads the specific model weights from the `ggml-org` repository.
+- 🐛 **Debug Mode**: Verify what the AI "sees" by saving extracted frames to disk.
 
 ## Prerequisites
 - **Python**: Version 3.8 or higher.
-- **RAM**: Minimum 2GB free for 'Normal' mode, up to 4GB+ for 'Super' mode.
-- **Storage**: ~1GB - 2GB of disk space for model weights.
+- **RAM**: Minimum ~2.5GB free for 'Smart' mode, up to ~4.0GB+ for 'Super' mode.
+- **Storage**: ~3GB - 5GB of disk space for model weights.
 
 ## Installation
 
@@ -36,44 +37,51 @@ Run the script and provide the path to your folder containing videos:
 ```bash
 python tag_my_videos_v2.py /path/to/your/video_folder
 ```
-The script will interactively ask you to select a processing mode (Normal, Smart, or Super).
+This runs in **Smart (Default)** mode.
 
 ### Command Line Arguments
-You can bypass the interactive menu using the `--mode` flag:
+You can control the behavior using flags:
 
 ```bash
-# Run in 'Smart' mode without prompts
-python tag_my_videos_v2.py ./vacation_clips --mode smart
+# Run in 'Super' mode for maximum accuracy
+python tag_my_videos_v2.py ./vacation_clips --mode super
+
+# Run with Debugging enabled (saves frames to ./debug_frames/)
+python tag_my_videos_v2.py ./vacation_clips --debug
 ```
 
 ### Processing Modes
 | Mode | RAM Req | Model Type | Description |
 |------|---------|------------|-------------|
-| **Normal** | ~1.5 GB | Q4_K_M | Fastest, good for general tagging. Default option. |
-| **Smart** | ~2.0 GB | Q8_0 | Balanced. Better detail retention than Normal. |
-| **Super** | ~3.0 GB | F16 | Lossless (Full Precision). Highest accuracy, requires most RAM. |
+| **Smart** | ~2.5 GB | Q8_0 | **Default**. High quality balanced with speed. (Repo: `ggml-org`) |
+| **Super** | ~4.0 GB | F16 | Lossless (Full Precision). Highest accuracy, requires more RAM. |
+
+### Compatibility Note (Google Drive / Cloud)
+The script works with mounted Cloud Drives (like Google Drive for Desktop).
+However, if streaming is slow, the script might read blank frames.
+**Tip:** Use the `--debug` flag to check if the script is successfully extracting images from your cloud drive. If the images in `debug_frames` are valid, the AI will work.
 
 ## Output
-The script generates a `video_tags.json` file in the directory where you ran the script.
+The script generates a `video_tags.jsonl` (JSON Lines) file. Each line is a self-contained JSON object, which is generally safer and faster for large datasets.
 
-**Example Output:**
+**Example Output (One Line):**
 ```json
+{"file": "beach.mp4", "path": "/videos/beach.mp4", "analysis": "Sunny beach...", "tier_used": "SmolVLM...", "processing_time_sec": 12.5}
+```
 [
   {
     "file": "beach_trip.mp4",
     "path": "/Users/videos/beach_trip.mp4",
-    "analysis": "Keywords: [beach, ocean, sunset, waves, sand], Summary: [A relaxing view of waves crashing on the beach during sunset.]",
-    "tier_used": "SmolVLM2-500M-Video-Instruct.Q4_K_M.gguf",
-    "processing_time": "8.42s"
+    "analysis": "The video shows a sunny beach with waves crashing gently on the shore. People are walking in the distance.\n\nKeywords: beach, ocean, waves, sunny, relaxation",
+    "tier_used": "SmolVLM2-500M-Video-Instruct-Q8_0.gguf",
+    "processing_time": "12.42s"
   }
 ]
 ```
 
 ## Troubleshooting
-- **"Missing dependencies" error**: Run the `pip install` command displayed in the error message.
-- **Script runs slowly**: 
-    - Ensure you are running on a machine with a decent CPU or GPU. 
-    - For Apple Silicon, verify you installed `llama-cpp-python` with `GGML_METAL=on`.
+- **Loops/Repetitive Text**: The updated V2 script uses valid vision projectors to solve this. Ensure you have internet access on the first run to download the new `mmproj` files.
+- **"Missing dependencies" error**: Run `pip install -r requirements.txt`.
 - **System crash / Out of Memory**: 
-    - Try the **Normal** mode first.
+    - Ensure you have enough free RAM.
     - Close other memory-intensive applications (Chrome, Photoshop, etc.).
