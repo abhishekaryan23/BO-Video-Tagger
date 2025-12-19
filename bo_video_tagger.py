@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+import hashlib
 import os
 __version__ = "2.0.0"
 import sys
@@ -24,6 +24,7 @@ from tqdm import tqdm
 REPO_ID = "ggml-org/SmolVLM2-500M-Video-Instruct-GGUF"
 CONTEXT_SIZE = 8192
 DEFAULT_DEBUG_DIR = "debug_frames"
+CACHE_DIR = os.path.expanduser("~/.cache/bo_video_tagger/models")
 
 # Setup Logger (Configured in main)
 logger = logging.getLogger("VideoTagger")
@@ -34,33 +35,40 @@ class ModelConfig:
     mmproj: str
     desc: str
     min_ram_gb: float
+    sha256: str
+    mmproj_sha256: str
 
 MODEL_TIERS = {
     "smart": ModelConfig(
         filename="SmolVLM2-500M-Video-Instruct-Q8_0.gguf",
         mmproj="mmproj-SmolVLM2-500M-Video-Instruct-Q8_0.gguf",
         desc="Balanced (Q8 Quantization)",
-        min_ram_gb=2.5
+        min_ram_gb=2.5,
+        sha256="6f67b8036b2469fcd71728702720c6b51aebd759b78137a8120733b4d66438bc",
+        mmproj_sha256="921dc7e259f308e5b027111fa185efcbf33db13f6e35749ddf7f5cdb60ef520b"
     ),
     "super": ModelConfig(
         filename="SmolVLM2-500M-Video-Instruct-f16.gguf",
         mmproj="mmproj-SmolVLM2-500M-Video-Instruct-f16.gguf",
         desc="Max Precision (F16 - Lossless)",
-        min_ram_gb=4.0
+        min_ram_gb=4.0,
+        sha256="80f7e3f04bc2d3324ac1a9f52f5776fe13a69912adf74f8e7edacf773d140d77",
+        mmproj_sha256="b5dc8ebe7cbeab66a5369693960a52515d7824f13d4063ceca78431f2a6b59b0"
     )
 }
 
 class VideoTagger:
-    def __init__(self, tier: str = "smart", debug: bool = False, interval: int = 10):
+    def __init__(self, tier: str = "smart", debug: bool = False, interval: int = 10, unsafe: bool = False):
         self.interval = interval
         self.debug = debug
+        self.unsafe = unsafe
         self.tier_name = tier
         
         if tier not in MODEL_TIERS:
             raise ValueError(f"Invalid tier: {tier}. Choices: {list(MODEL_TIERS.keys())}")
             
         self.config = MODEL_TIERS[tier]
-        self.model_dir = os.path.join(os.getcwd(), "models")
+        self.model_dir = CACHE_DIR
         self.debug_dir = os.path.join(os.getcwd(), DEFAULT_DEBUG_DIR)
         
         self.llm: Optional[Llama] = None
@@ -79,21 +87,87 @@ class VideoTagger:
             os.makedirs(self.debug_dir, exist_ok=True)
             logger.info(f"🐛 Debug mode ON. Frames: {self.debug_dir}")
 
+    def _verify_file(self, path: str, expected_hash: str) -> bool:
+        """Verifies SHA256 hash of a file."""
+        if not os.path.exists(path):
+            return False
+            
+        logger.info(f"🔒 Verifying integrity of {os.path.basename(path)}...")
+        sha256 = hashlib.sha256()
+        try:
+            with open(path, 'rb') as f:
+                while chunk := f.read(65536):
+                    sha256.update(chunk)
+            
+            calculated = sha256.hexdigest()
+            if calculated != expected_hash:
+                logger.critical(f"❌ INTEGRITY FAILURE! Hash mismatch for {path}")
+                logger.critical(f"Expected: {expected_hash}")
+                logger.critical(f"Calculated: {calculated}")
+                return False
+            
+            logger.info("✅ Hash verified.")
+            return True
+        except Exception as e:
+            logger.error(f"Error checking hash: {e}")
+            return False
+
     def _download_models(self):
-        """Ensures both model and projector exist."""
-        if os.path.exists(self.model_path) and os.path.exists(self.mmproj_path):
+        """Ensures both model and projector exist and match SHA256."""
+        if self.unsafe:
+            logger.warning("⚠️  SKIPPING INTEGRITY CHECKS (Unsafe Mode)")
+            # In unsafe mode, just ensure files exist, do not verify hash or delete
+            try:
+                for fname in [self.config.filename, self.config.mmproj]:
+                     hf_hub_download(
+                        repo_id=REPO_ID,
+                        filename=fname,
+                        local_dir=self.model_dir,
+                        local_dir_use_symlinks=False
+                    )
+            except Exception:
+                 logger.exception("Download failed even in unsafe mode.")
+                 sys.exit(1)
             return
 
+        # 1. Check if files exist and are valid
+        valid_model = self._verify_file(self.model_path, self.config.sha256)
+        valid_proj = self._verify_file(self.mmproj_path, self.config.mmproj_sha256)
+        
+        if valid_model and valid_proj:
+            return
+
+        # 2. Delete invalid files if they exist
+        if os.path.exists(self.model_path) and not valid_model:
+            logger.warning("Found corrupted model. Deleting...")
+            os.remove(self.model_path)
+            
+        if os.path.exists(self.mmproj_path) and not valid_proj:
+            logger.warning("Found corrupted projector. Deleting...")
+            os.remove(self.mmproj_path)
+
+        # 3. Download
         logger.info(f"⬇️  Downloading {self.tier_name.upper()} model files from {REPO_ID}...")
         try:
-            for fname in [self.config.filename, self.config.mmproj]:
-                hf_hub_download(
-                    repo_id=REPO_ID,
-                    filename=fname,
-                    local_dir=self.model_dir,
-                    local_dir_use_symlinks=False
-                )
-            logger.info("✅ Download complete.")
+            for fname, expected_hash in [
+                (self.config.filename, self.config.sha256), 
+                (self.config.mmproj, self.config.mmproj_sha256)
+            ]:
+                path = os.path.join(self.model_dir, fname)
+                if not os.path.exists(path):
+                    hf_hub_download(
+                        repo_id=REPO_ID,
+                        filename=fname,
+                        local_dir=self.model_dir,
+                        local_dir_use_symlinks=False
+                    )
+                    # Verify immediately after download
+                    if not self._verify_file(path, expected_hash):
+                        logger.critical("❌ SECURITY ALERT: Downloaded file hash mismatch. Aborting.")
+                        os.remove(path)
+                        sys.exit(1)
+
+            logger.info("✅ Download and verification complete.")
         except Exception as e:
             logger.exception("Failed to download model files.")
             sys.exit(1)
@@ -286,6 +360,7 @@ def main():
     parser.add_argument("--interval", type=int, default=10, help="Frame extraction interval in seconds (default: 10)")
     parser.add_argument("--output", help="Custom output directory or filename")
     parser.add_argument("--debug", action="store_true", help="Save debug frames")
+    parser.add_argument("--unsafe", action="store_true", help="DISABLE security checks (Model Integrity)")
     args = parser.parse_args()
 
     # Early Validation
@@ -293,12 +368,34 @@ def main():
         logger.error(f"Directory not found: {args.folder}")
         sys.exit(1)
 
+    # Determine Output Path (Early Validation)
+    timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    folder_name = os.path.basename(os.path.normpath(args.folder))
+    default_filename = f"{folder_name}_video_tags_{timestamp}.jsonl"
+
+    if args.output:
+        if os.path.isdir(args.output):
+            output_path = os.path.join(args.output, default_filename)
+        else:
+            output_path = args.output
+            
+        # SECURITY: Exact extension check
+        if not output_path.endswith(".jsonl"):
+            logger.critical("⛔ SECURITY ERROR: Output file must have .jsonl extension.")
+            logger.critical(f"Provided path: {output_path}")
+            sys.exit(1)
+    else:
+        output_path = default_filename
+
     if not check_system_resources(args.mode):
         logger.error("Aborted due to system requirements.")
         sys.exit(1)
 
+    if args.unsafe:
+        logger.warning("⚠️  UNSAFE MODE ENABLED: Skipping integrity checks!")
+
     # Initialize Tagger
-    tagger = VideoTagger(tier=args.mode, debug=args.debug, interval=args.interval)
+    tagger = VideoTagger(tier=args.mode, debug=args.debug, interval=args.interval, unsafe=args.unsafe)
     tagger.prepare()
 
     # Find Videos
@@ -314,22 +411,7 @@ def main():
 
     logger.info(f"Processing {len(video_files)} videos...")
 
-    # Determine Output Path
-    timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-    folder_name = os.path.basename(os.path.normpath(args.folder))
-    # User Request: "{Folder}_video_tags_{Date}.jsonl"
-    default_filename = f"{folder_name}_video_tags_{timestamp}.jsonl"
 
-    if args.output:
-        if os.path.isdir(args.output):
-             # User gave a directory: /path/to/save/ -> /path/to/save/Folder_video_tags_Date.jsonl
-            output_path = os.path.join(args.output, default_filename)
-        else:
-            # User gave a specific file: /path/to/my_file.jsonl
-            output_path = args.output
-    else:
-        # Default: Save in CWD with dynamic name
-        output_path = default_filename
 
     logger.info(f"💾 Saving results to: {output_path}")
     

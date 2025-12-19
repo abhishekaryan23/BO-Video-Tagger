@@ -100,13 +100,29 @@ Control precision, speed, and output location.
 | :--- | :--- | :--- |
 | `--mode` | **smart** (Q8, Fast) or **super** (F16, Detailed) | `--mode super` |
 | `--interval` | Seconds between frame checks (Default: 10s) | `--interval 5` |
-| `--output` | Custom save folder or filename | `--output ./results` |
+| `--output` | Custom save folder or filename (**Must end in .jsonl**) | `--output ./results.jsonl` |
 | `--debug` | Save analyzed frames to `debug_frames/` | `--debug` |
+| `--unsafe` | **Skip integrity checks** (Use at own risk) | `--unsafe` |
 
 **Full Power Run:**
 ```bash
 python bo_video_tagger.py "/Volumes/NAS/Footage" --mode super --interval 5 --output ./nas_analysis.jsonl
 ```
+
+---
+
+## 🔒 Security & Integrity
+This tool includes "brutal" security standards by default:
+1.  **Integrity Verified**: Every model download is checked against a hardcoded SHA256 hash. If the file is corrupted or tampered with, the tool **will refuse to run**.
+2.  **Safe Storage**: Models are stored in `~/.cache/bo_video_tagger/models` to keep your workspace clean.
+3.  **Strict Output**: The tool strictly enforces `.jsonl` output buffers to prevent file system corruption.
+
+### ⚠️ Unsafe Mode
+If you are experimenting or using custom models, you can bypass these checks:
+```bash
+python bo_video_tagger.py /path/to/videos --unsafe
+```
+*Warning: This disables hash verification.*
 
 ---
 
@@ -148,6 +164,8 @@ Default name: `{Folder}_video_tags_{Date}.jsonl`
 | **Slow Processing** | If on Network Drive, try `--interval 20`. Or copy files locally. |
 | **System Crash / OOM** | Use `--mode smart`. Close Chrome/Photoshop. |
 | **Blank/Black Analysis** | Run with `--debug`. Check `debug_frames/` to see if video is readable. |
+| **Integrity Failure** | Delete `~/.cache/bo_video_tagger` and re-run. Or use `--unsafe` (Risky). |
+| **"Output must be .jsonl"** | Change your `--output` filename to end in `.jsonl`. |
 
 ---
 *Powered by SmolVLM2 & Llama.cpp*
