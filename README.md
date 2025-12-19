@@ -114,10 +114,28 @@ python bo_video_tagger.py "/Volumes/NAS/Footage" --mode super --interval 5 --out
 Files are saved as **JSONL (JSON Lines)** for safety and speed.
 Default name: `{Folder}_video_tags_{Date}.jsonl`
 
-**Example Content:**
+**New Rich Schema (V2.1):**
 ```json
-{"file": "clip_01.mp4", "analysis": "A golden retriever playing tag...", "keywords": ["dog", "park", "sunny"]}
-{"file": "clip_02.mp4", "analysis": "Screen recording of VS Code...", "keywords": ["coding", "python", "ide"]}
+{
+  "meta": {
+    "file": "clip_01.mp4",
+    "path": "/abs/path/to/clip_01.mp4",
+    "size_mb": 45.2,
+    "duration_sec": 12.5,
+    "resolution": "1920x1080",
+    "fps": 30
+  },
+  "ai": {
+    "summary": "A golden retriever playing tag in a park...",
+    "description": "A golden retriever playing tag in a park. The dog is running...",
+    "tags": ["dog", "park", "sunny", "slow-motion"]
+  },
+  "system": {
+    "model": "SmolVLM2-500M-Video-Instruct-Q8_0.gguf",
+    "timestamp": "2024-12-19 14:00:00",
+    "processing_time_sec": 4.2
+  }
+}
 ```
 
 ---

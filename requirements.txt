@@ -4,3 +4,4 @@ llama-cpp-python
 tqdm
 psutil
 numpy
+yake

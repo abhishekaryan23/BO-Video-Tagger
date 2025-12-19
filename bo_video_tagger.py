@@ -8,8 +8,11 @@ import argparse
 import logging
 import psutil
 import cv2
+import re
+import textwrap
 import base64
 import numpy as np
+import yake
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 from huggingface_hub import hf_hub_download
@@ -21,16 +24,8 @@ from tqdm import tqdm
 REPO_ID = "ggml-org/SmolVLM2-500M-Video-Instruct-GGUF"
 CONTEXT_SIZE = 8192
 DEFAULT_DEBUG_DIR = "debug_frames"
-REPO_ID = "ggml-org/SmolVLM2-500M-Video-Instruct-GGUF"
-CONTEXT_SIZE = 8192
-DEFAULT_DEBUG_DIR = "debug_frames"
 
-# Setup Logging
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%H:%M:%S'
-)
+# Setup Logger (Configured in main)
 logger = logging.getLogger("VideoTagger")
 
 @dataclass
@@ -119,14 +114,28 @@ class VideoTagger:
             logger.exception("Failed to initialize Inference Engine.")
             sys.exit(1)
 
-    def extract_frames(self, video_path: str, max_frames: int = 5) -> List[str]:
+    def extract_frames(self, video_path: str, max_frames: int = 5) -> tuple[List[str], Dict[str, Any]]:
         cap = cv2.VideoCapture(video_path)
+        metadata = {"duration_sec": 0, "resolution": "unknown", "fps": 0, "frame_count": 0}
+        
         if not cap.isOpened():
             logger.warning(f"Could not open video: {video_path}")
-            return []
+            return [], metadata
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        # Fallback to 30fps if metadata is broken, typical for some web streams
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            metadata["fps"] = round(fps, 2)
+            metadata["resolution"] = f"{w}x{h}"
+            metadata["frame_count"] = total_frames
+            metadata["duration_sec"] = round(total_frames / fps, 2) if fps > 0 else 0
+        except Exception as e:
+            logger.warning(f"Metadata extraction warning: {e}")
+
+        # Fallback to 30fps if metadata is broken
         frame_interval = int(fps * self.interval) if fps > 0 else 300 
         
         base64_frames = []
@@ -158,7 +167,42 @@ class VideoTagger:
             count += 1
             
         cap.release()
-        return base64_frames
+        return base64_frames, metadata
+
+    def _parse_ai_response(self, text: str) -> Dict[str, Any]:
+        """Robustly parses the AI output using YAKE-First Strategy."""
+        
+        # 1. Clean Chatty Prefixes ("Sure, here is...", "Assistant:")
+        # Handles optional colon and varying casing
+        clean_text = re.sub(r'(?i)^(here is|sure|okay|assistant|ai):?\s*', '', text.strip())
+        
+        # 2. Generate Professional Summary (Smart Truncation)
+        # Uses textwrap to avoid breaking words mid-string
+        summary = textwrap.shorten(clean_text, width=150, placeholder="...")
+        
+        # 3. YAKE Extraction (Primary Tagging Source)
+        tags = self._extract_yake_tags(clean_text)
+        
+        return {
+            "summary": summary,
+            "description": clean_text,
+            "tags": tags
+        }
+
+    def _extract_yake_tags(self, text: str) -> List[str]:
+        """Extracts significant keywords using YAKE (Unsupervised Statistical Learning)."""
+        try:
+            # Init YAKE: English, max n-gram=2 (e.g. "Workload Domain")
+            # dedupLim=0.3 -> STRICT deduplication to avoid "Video" vs "Video Tutorial"
+            kw_extractor = yake.KeywordExtractor(lan="en", n=2, dedupLim=0.4, top=5, features=None)
+            keywords = kw_extractor.extract_keywords(text)
+            
+            # YAKE returns [(kw, score), ...] - lower score is better
+            tags = [kw for kw, score in keywords]
+            return tags if tags else ["untagged"]
+        except Exception as e:
+            logger.warning(f"YAKE extraction failed: {e}")
+            return ["untagged", "error"]
 
     def process_video(self, video_path: str) -> Dict[str, Any]:
         """Runs the VLM on a single video file."""
@@ -167,35 +211,52 @@ class VideoTagger:
 
         start_time = time.time()
         try:
-            frames = self.extract_frames(video_path)
+            frames, vid_meta = self.extract_frames(video_path)
             if not frames:
-                return {"file": os.path.basename(video_path), "error": "No valid frames extracted"}
+                return {"meta": {"file": os.path.basename(video_path)}, "error": "No valid frames extracted"}
 
             content = [{"type": "image_url", "image_url": {"url": img}} for img in frames]
+            
+            # Simplified Prompt (Focused on Description)
+            prompt_text = (
+                "Describe the content of this video in detail. "
+                "Focus on technical terms, objects present in the scene, and actions being performed."
+            )
+            
             content.append({
                 "type": "text", 
-                "text": "Describe the content of this video in detail. Then provide 5 keywords that summarize it."
+                "text": prompt_text
             })
 
             response = self.llm.create_chat_completion(
                 messages=[{"role": "user", "content": content}],
-                max_tokens=256,
-                temperature=0.6,
+                max_tokens=512, # Increased for detailed desc + tags
+                temperature=0.5, # Lower temp for strict formatting
                 repeat_penalty=1.1
             )
             
+            raw_text = response['choices'][0]['message']['content']
+            parsed_ai = self._parse_ai_response(raw_text)
+            
+            # Construct Rich Dictionary
             return {
-                "file": os.path.basename(video_path),
-                "path": video_path,
-                "analysis": response['choices'][0]['message']['content'],
-                "tier_used": self.config.filename,
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "processing_time_sec": round(time.time() - start_time, 2)
+                "meta": {
+                    "file": os.path.basename(video_path),
+                    "path": video_path,
+                    "size_mb": round(os.path.getsize(video_path) / (1024*1024), 2),
+                    **vid_meta
+                },
+                "ai": parsed_ai,
+                "system": {
+                    "model": self.config.filename,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "processing_time_sec": round(time.time() - start_time, 2)
+                }
             }
 
         except Exception as e:
             logger.exception(f"Error processing {video_path}")
-            return {"file": os.path.basename(video_path), "error": str(e)}
+            return {"meta": {"file": os.path.basename(video_path)}, "error": str(e)}
 
 def check_system_resources(tier: str) -> bool:
     mem = psutil.virtual_memory()
@@ -212,13 +273,25 @@ def check_system_resources(tier: str) -> bool:
     return True
 
 def main():
-    parser = argparse.ArgumentParser(description="Video Tagger V2 (Professional)")
+    # Configure Logging
+    logging.basicConfig(
+        level=logging.INFO, 
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%H:%M:%S'
+    )
+
+    parser = argparse.ArgumentParser(description=f"BO Video Tagger v{__version__}")
     parser.add_argument("folder", help="Path to video folder")
     parser.add_argument("--mode", choices=MODEL_TIERS.keys(), default="smart", help="Processing mode")
     parser.add_argument("--interval", type=int, default=10, help="Frame extraction interval in seconds (default: 10)")
     parser.add_argument("--output", help="Custom output directory or filename")
     parser.add_argument("--debug", action="store_true", help="Save debug frames")
     args = parser.parse_args()
+
+    # Early Validation
+    if not os.path.exists(args.folder):
+        logger.error(f"Directory not found: {args.folder}")
+        sys.exit(1)
 
     if not check_system_resources(args.mode):
         logger.error("Aborted due to system requirements.")
