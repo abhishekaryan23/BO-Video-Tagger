@@ -31,6 +31,33 @@ Manual tagging wastes human capital. Cloud APIs rent you back your own processin
   <img src="assets/performance_chart.png" alt="Performance Comparison Chart" width="80%"/>
 </p>
 
+</p>
+
+---
+
+## 🎯 Who is this for?
+<p align="center">
+  <img src="assets/target_audience.png" alt="Target Audience Personas" width="100%"/>
+</p>
+
+**BO Video Tagger** is built for users who own their infrastructure and value data sovereignty.
+
+### 🛡️ The Privacy Absolutist (Legal/Medical)
+*   **The Pain**: You have sensitive footage (depositions, patient monitoring, body cams) that cannot legally leave the building.
+*   **The Win**: "Air-gapped" analysis. Process terabytes of sensitive data on a disconnected laptop with **zero data exfiltration risk**. (Models runs 100% locally).
+
+### 🎬 The Content Creator & Editor
+*   **The Pain**: You have a NAS full of "B-Roll" named `C0012.mp4` and no way to find that one shot of a "rainy street."
+*   **The Win**: Turn your "Folder of Doom" into a **searchable database** overnight without paying $500/month for cloud MAM fees.
+
+### 💾 The Data Hoarder & Homelabber
+*   **The Pain**: Your Plex/Jellyfin library has thousands of unorganized home videos and clips.
+*   **The Win**: Use your existing hardware to auto-curate your life's digital history. Works directly on your mapped **SMB/NFS shares**.
+
+### 🏢 The IT Admin
+*   **The Pain**: File servers are clogged with "dark data"—unknown video files eating up storage.
+*   **The Win**: Audit shared drives to identify business-critical recordings vs. personal junk files without watching a second of footage.
+
 ---
 
 ## 🛠️ Prerequisites
