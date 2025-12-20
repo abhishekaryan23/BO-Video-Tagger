@@ -9,7 +9,7 @@ def render_sidebar(worker: VideoWorker):
         if os.path.exists("assets/logo.png"):
             st.image("assets/logo.png", width=150)
         else:
-            st.title("BO-View")
+            st.title("BO Video Tagger")
         
         st.markdown("### Control Deck")
         

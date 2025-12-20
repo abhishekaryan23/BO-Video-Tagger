@@ -5,7 +5,7 @@ from logging.handlers import RotatingFileHandler
 
 @dataclass
 class Settings:
-    """Central Configuration for BO-View."""
+    """Central Configuration for BO Video Tagger."""
     # Paths
     BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
     CACHE_DIR: str = os.path.expanduser("~/.cache/bo_video_tagger")
@@ -58,4 +58,4 @@ def configure_logging():
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
 
-    logging.info("🚀 BO-View Logging Initialized")
+    logging.info("🚀 BO Video Tagger Logging Initialized")

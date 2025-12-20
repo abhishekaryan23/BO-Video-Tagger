@@ -14,7 +14,7 @@ import base64
 import numpy as np
 import yake
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
 from llama_cpp.llama_chat_format import Llava15ChatHandler

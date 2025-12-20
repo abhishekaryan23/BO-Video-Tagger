@@ -12,7 +12,7 @@ from components.inspector import check_inspector_state
 
 # --- 1. CONFIGURATION & STYLING ---
 st.set_page_config(
-    page_title="BO-View Titanium",
+    page_title="BO Video Tagger",
     page_icon="🎬",
     layout="wide",
     initial_sidebar_state="expanded"
