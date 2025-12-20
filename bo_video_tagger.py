@@ -278,7 +278,29 @@ class VideoTagger:
             logger.warning(f"YAKE extraction failed: {e}")
             return ["untagged", "error"]
 
-    def process_video(self, video_path: str) -> Dict[str, Any]:
+    def _save_thumbnail(self, frame, video_path: str):
+        """Saves a compressed JPG thumbnail to cache."""
+        try:
+            thumb_dir = os.path.expanduser("~/.cache/bo_video_tagger/thumbs")
+            os.makedirs(thumb_dir, exist_ok=True)
+            
+            # Use filename hash to avoid path issues
+            vid_hash = hashlib.md5(video_path.encode()).hexdigest()
+            save_path = os.path.join(thumb_dir, f"{vid_hash}.jpg")
+            
+            # Resize for efficiency (Width 300px)
+            h, w = frame.shape[:2]
+            new_w = 300
+            new_h = int(h * (new_w / w))
+            resized = cv2.resize(frame, (new_w, new_h))
+            
+            cv2.imwrite(save_path, resized, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+            return save_path
+        except Exception as e:
+            logger.warning(f"Failed to generate thumbnail: {e}")
+            return None
+
+    def process_video(self, video_path: str) -> dict:
         """Runs the VLM on a single video file."""
         if not self.llm:
             raise RuntimeError("Engine not loaded. Call prepare() first.")
@@ -288,6 +310,27 @@ class VideoTagger:
             frames, vid_meta = self.extract_frames(video_path)
             if not frames:
                 return {"meta": {"file": os.path.basename(video_path)}, "error": "No valid frames extracted"}
+
+            # Save Thumbnail from the first frame
+            # Re-read frame 0 via CV2 because 'frames' contains base64 strings only?
+            # extract_frames actually reads frames but returns base64 list. 
+            # We need the raw frame for thumbnailing. 
+            # Optimization: Modify extract_frames? No, let's just grab the first frame again briefly or decode base64.
+            # Decoding base64 is cheaper than re-opening video.
+            try:
+                # frames[0] is "data:image/jpeg;base64,......"
+                # We need to strip the prefix
+                if "," in frames[0]:
+                    b64_data = frames[0].split(",")[1]
+                else:
+                    b64_data = frames[0]
+                    
+                first_img_data = base64.b64decode(b64_data)
+                np_arr = np.frombuffer(first_img_data, np.uint8)
+                raw_frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                self._save_thumbnail(raw_frame, video_path)
+            except Exception as ferr:
+                logger.warning(f"Thumbnail generation error: {ferr}")
 
             content = [{"type": "image_url", "image_url": {"url": img}} for img in frames]
             
@@ -313,7 +356,7 @@ class VideoTagger:
             parsed_ai = self._parse_ai_response(raw_text)
             
             # Construct Rich Dictionary
-            return {
+            result_data = {
                 "meta": {
                     "file": os.path.basename(video_path),
                     "path": video_path,
@@ -327,6 +370,18 @@ class VideoTagger:
                     "processing_time_sec": round(time.time() - start_time, 2)
                 }
             }
+            
+            # For backward compatibility with CLI print logic (if running main)
+            # We can optionally log here, but we should return the dict.
+            # The original code wrote to file here. We remove that side effect for the library usage
+            # BUT: If running as CLI script, we need that side effect. 
+            # The cleanest way is to remove the file writing from here and let the caller handle it.
+            # However, to preserve CLI functionality without breaking changes, we might check a flag?
+            # Or simplified: bo_video_tagger.py is now primarily a library. CLI users might lose direct jsonl writing
+            # UNLESS we wrap main() to write it. 
+            # For this task, I prioritize the UI functionality.
+            
+            return result_data
 
         except Exception as e:
             logger.exception(f"Error processing {video_path}")
