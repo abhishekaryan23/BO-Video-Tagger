@@ -59,8 +59,10 @@
 
 3.  **Explore**:
     -   **Gallery**: Browse your videos, filter by folder, or search.
+        ![Library View](assets/library_blurred.png)
     -   **Inspect**: Click "Inspect" on any video to play it and edit tags manually.
     -   **Analytics**: Switch to the "Intelligence Analytics" tab for charts and graphs.
+        ![Analytics Dashboard](assets/analytics_blurred.png)
 
 ## 🔒 Security & Privacy
 -   **100% Offline**: Models run locally via `llama-cpp-python`.
