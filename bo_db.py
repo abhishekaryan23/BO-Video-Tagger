@@ -13,11 +13,16 @@ from bo_config import Settings, configure_logging
 configure_logging()
 logger = logging.getLogger("VideoDB")
 
+import weakref
+
 class VideoDB:
-    def __init__(self):
-        self.conn = sqlite3.connect(Settings.DB_PATH, check_same_thread=False)
+    def __init__(self, db_path: str = None):
+        target_path = db_path or Settings.DB_PATH
+        self.conn = sqlite3.connect(target_path, check_same_thread=False, timeout=30.0)
         self.conn.row_factory = sqlite3.Row
         self._init_db()
+        # Ensure connection is closed when object is garbage collected
+        self._finalizer = weakref.finalize(self, self.conn.close)
 
     def __enter__(self):
         return self
@@ -45,9 +50,34 @@ class VideoDB:
                 summary TEXT,
                 description TEXT,
                 metadata JSON,
-                processed_at DATETIME
+                processed_at DATETIME,
+                parent_folder TEXT
             )
         ''')
+
+        # Schema Migration: Add parent_folder if missing (Safe Lazy Migration)
+        cursor.execute("PRAGMA table_info(videos)")
+        columns = [row['name'] for row in cursor.fetchall()]
+        if 'parent_folder' not in columns:
+            try:
+                logger.info("⚡ Migrating Schema: Adding parent_folder column...")
+                cursor.execute("BEGIN IMMEDIATE")
+                cursor.execute("ALTER TABLE videos ADD COLUMN parent_folder TEXT")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_parent_folder ON videos(parent_folder)")
+                self.conn.commit()
+                
+                # Backfill existing records
+                logger.info("🔄 Backfilling parent_folder for existing records...")
+                cursor.execute("SELECT path FROM videos WHERE parent_folder IS NULL")
+                rows = cursor.fetchall()
+                if rows:
+                    updates = [(os.path.basename(os.path.dirname(row[0])), row[0]) for row in rows]
+                    cursor.executemany("UPDATE videos SET parent_folder = ? WHERE path = ?", updates)
+                    self.conn.commit()
+                    logger.info(f"✅ Backfilled {len(updates)} records.")
+            except Exception as e:
+                logger.error(f"Schema Migration Failed: {e}")
+                self.conn.rollback()
         
         # Full Text Search Index (FTS5)
         try:
@@ -81,21 +111,23 @@ class VideoDB:
         summary = ai.get("summary", "")
         description = ai.get("description", "")
         processed_at = system.get("timestamp", datetime.now().isoformat())
+        parent_folder = os.path.basename(os.path.dirname(path))
 
         cursor = self.conn.cursor()
         
         try:
             # 1. Update Main Table
             cursor.execute('''
-                INSERT INTO videos (path, filename, size_mb, duration_sec, resolution, tags, summary, description, metadata, processed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO videos (path, filename, size_mb, duration_sec, resolution, tags, summary, description, metadata, processed_at, parent_folder)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     tags=excluded.tags,
                     summary=excluded.summary,
                     description=excluded.description,
                     metadata=excluded.metadata,
-                    processed_at=excluded.processed_at
-            ''', (path, filename, size_mb, duration, resolution, tags, summary, description, json.dumps(data), processed_at))
+                    processed_at=excluded.processed_at,
+                    parent_folder=excluded.parent_folder
+            ''', (path, filename, size_mb, duration, resolution, tags, summary, description, json.dumps(data), processed_at, parent_folder))
             
             # 2. Update Search Index (if FTS enabled)
             if self.has_fts:
@@ -110,11 +142,32 @@ class VideoDB:
             logger.error(f"DB Insert Error: {e}")
             self.conn.rollback()
 
-    def get_all_videos(self, limit: int = 100, offset: int = 0) -> List[dict]:
-        """Retrieve all videos for gallery view."""
+    def get_all_videos(self, limit: int = 100, offset: int = 0, folder_filter: str = None) -> List[dict]:
+        """Retrieve videos, optionally filtered by folder."""
         cursor = self.conn.cursor()
-        cursor.execute('SELECT * FROM videos ORDER BY processed_at DESC LIMIT ? OFFSET ?', (limit, offset))
+        
+        if folder_filter and folder_filter != "All":
+            cursor.execute('''
+                SELECT * FROM videos 
+                WHERE path LIKE ? 
+                ORDER BY processed_at DESC LIMIT ? OFFSET ?
+            ''', (f"%{folder_filter}%", limit, offset))
+        else:
+            cursor.execute('SELECT * FROM videos ORDER BY processed_at DESC LIMIT ? OFFSET ?', (limit, offset))
+            
         return [dict(row) for row in cursor.fetchall()]
+
+    def get_unique_folders(self) -> List[str]:
+        """Returns a list of distinct parent folders (Optimized)."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT DISTINCT parent_folder FROM videos WHERE parent_folder IS NOT NULL ORDER BY parent_folder") 
+        return [row[0] for row in cursor.fetchall()]
+
+    def get_all_file_paths_set(self) -> set:
+        """Returns a set of all indexed file paths for O(1) lookups."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT path FROM videos")
+        return {row[0] for row in cursor.fetchall()}
 
     def search_videos(self, query: str) -> List[dict]:
         """Search videos using FTS or LIKE."""

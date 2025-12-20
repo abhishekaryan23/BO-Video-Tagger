@@ -15,16 +15,49 @@ def render_gallery(db: VideoDB):
 
         search_q = st.text_input("Search Library", placeholder="Type to search objects, tags, or descriptions...", label_visibility="collapsed", on_change=clear_inspector)
 
+        col_filter, col_pg = st.columns([3, 1])
+        
+        # Callback to reset page on filter change
+        def reset_page():
+            st.session_state.gallery_page = 0
+            if 'selected_video' in st.session_state:
+                st.session_state.selected_video = None
+
+        with col_filter:
+            # Folder Filter
+            all_folders = ["All"] + db.get_unique_folders()
+            selected_folder = st.selectbox("📂 Filter by Source", all_folders, on_change=reset_page)
+
+        # Pagination State
+        if 'gallery_page' not in st.session_state:
+            st.session_state.gallery_page = 0
+            
+        PAGE_SIZE = 50
+        offset = st.session_state.gallery_page * PAGE_SIZE
+
         # Fetch Data
         if search_q:
-            videos = db.search_videos(search_q)
+            videos = db.search_videos(search_q) # Search ignores pagination for now to keep it simple
+            is_search = True
         else:
-            videos = db.get_all_videos(limit=100)
+            videos = db.get_all_videos(limit=PAGE_SIZE, offset=offset, folder_filter=selected_folder)
+            is_search = False
 
-        if not videos:
+        if not videos and st.session_state.gallery_page == 0:
             st.warning("No videos found. Point to a folder and click 'Start Indexing'.")
         else:
-            st.markdown(f"**{len(videos)} Assets Found**")
+            # Pagination Controls (Only show if not searching)
+            if not is_search:
+                with col_pg:
+                    c_prev, c_next = st.columns(2)
+                    if c_prev.button("◀", disabled=st.session_state.gallery_page == 0):
+                        st.session_state.gallery_page -= 1
+                        st.rerun()
+                    if c_next.button("▶", disabled=len(videos) < PAGE_SIZE):
+                        st.session_state.gallery_page += 1
+                        st.rerun()
+
+            st.markdown(f"**Showing {len(videos)} Assets**")
             
             # Masonry Grid Logic
             cols = st.columns(Settings.GRID_COLUMNS)
@@ -42,7 +75,15 @@ def render_gallery(db: VideoDB):
                 
                 with col:
                     st.image(real_thumb, width="stretch")
-                    st.markdown(f"**{video['filename']}**")
+                    
+                    # Display Logic: Show Folder name if in 'All' view to avoid confusion
+                    if selected_folder == "All":
+                        parent = os.path.basename(os.path.dirname(vid_path))
+                        # Use Help tooltip for full path
+                        st.markdown(f"**{video['filename']}**", help=vid_path)
+                        st.caption(f"📁 {parent}")
+                    else:
+                        st.markdown(f"**{video['filename']}**")
                     
                     # Tags (XSS FIXED)
                     tags = video['tags'].split(",")[:3] if video['tags'] else []

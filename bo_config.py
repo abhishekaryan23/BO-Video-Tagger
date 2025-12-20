@@ -20,6 +20,12 @@ class Settings:
     # System
     MAX_LOG_SIZE_BYTES: int = 5 * 1024 * 1024 # 5MB
     LOG_BACKUP_COUNT: int = 3
+    
+    # Performance Scanning
+    IGNORE_DIRS = ('.git', 'node_modules', '__pycache__', 'env', 'venv', 'Library', 'AppData', '.Trash')
+
+    # Component Settings
+    ANALYTICS_TTL: int = 60
 
 def configure_logging():
     """Sets up robust logging with rotation."""

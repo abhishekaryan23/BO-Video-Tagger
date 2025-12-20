@@ -1,11 +1,11 @@
 import streamlit as st
-import pandas as pd
 import altair as alt
-import json
 import os
+import json
+from bo_config import Settings
 from bo_db import VideoDB
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=Settings.ANALYTICS_TTL)
 def fetch_analytics_data(_db):
     """Cached data fetcher. _db is unhashed/underscored to exclude from cache hash if needed, 
     but for this simple case we assume DB is stable-ish or ttl handles it."""
@@ -37,11 +37,31 @@ def render_analytics(db: VideoDB):
         df['ai_time'] = df['metadata'].apply(get_ai_time)
 
         # --- KPI ROW ---
+        def format_time(seconds):
+            if seconds < 60:
+                return f"{seconds:.1f}s"
+            elif seconds < 3600:
+                m = int(seconds // 60)
+                s = int(seconds % 60)
+                return f"{m}m {s}s"
+            else:
+                h = int(seconds // 3600)
+                m = int((seconds % 3600) // 60)
+                return f"{h}h {m}m"
+
+        total_duration = df['duration_sec'].sum()
+        total_ai_time = df['ai_time'].sum()
+        speedup = (total_duration / total_ai_time) if total_ai_time > 0 else 0
+
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total Assets", len(df))
-        k2.metric("Total Storage", f"{df['size_mb'].sum() / 1024:.2f} GB")
-        k3.metric("Total Duration", f"{df['duration_sec'].sum() / 3600:.1f} Hrs")
-        k4.metric("Avg AI Speed", f"{df['ai_time'].mean():.1f} s/vid")
+        # k2.metric("Total Storage", f"{df['size_mb'].sum() / 1024:.2f} GB") 
+        # Replaced Storage with Footage Duration as per request
+        k2.metric("Footage Processed", format_time(total_duration))
+        
+        k3.metric("Processing Time", format_time(total_ai_time))
+        
+        k4.metric("Efficiency", f"{speedup:.1f}x", help="Speedup Factor (Footage Duration / Processing Time)")
         
         st.markdown("---")
         
@@ -63,13 +83,13 @@ def render_analytics(db: VideoDB):
                 text="folder",
                 order=alt.Order("size_mb", sort="descending") 
             )
-            st.altair_chart(pie + text, use_container_width=True, theme="streamlit")
+            st.altair_chart(pie + text, theme="streamlit", use_container_width=True)
             
         with c2:
             st.markdown("### 🏷️ Tag Ecosystem (Top 20)")
             # Explosion Logic for Tags
             # Handle empty tags first
-            tag_df = df.assign(tags=df['tags'].str.astype(str).str.split(',')).explode('tags')
+            tag_df = df.assign(tags=df['tags'].astype(str).str.split(',')).explode('tags')
             tag_df['tags'] = tag_df['tags'].str.strip()
             tag_df = tag_df[tag_df['tags'] != ''] # Cleanup
             tag_df = tag_df[tag_df['tags'] != 'nan'] # Cleanup string nan

@@ -76,9 +76,13 @@ STYLING = """
     }
     
     /* Hide Streamlit Elements */
+    /* Hide Streamlit Elements */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
+    /* header {visibility: hidden;}  <-- This hides the sidebar toggle! */
+    [data-testid="stHeader"] {
+        background-color: rgba(0,0,0,0);
+    }
 </style>
 """
 st.markdown(STYLING, unsafe_allow_html=True)
@@ -126,9 +130,35 @@ try:
                 st.text(curr_text)
 except AttributeError:
     # Fallback for older Streamlit versions without fragment
+    # Fallback for older Streamlit versions without fragment
     def monitor_progress():
         if st.session_state.worker.is_running:
-            st.warning("Update Streamlit to enable efficient progress monitoring.")
+            # Poll queue once per render
+            try:
+                while True:
+                    signal, data = st.session_state.worker.queue.get_nowait()
+                    if signal == WorkerSignals.PROGRESS:
+                        curr, total, name = data
+                        st.session_state['progress_float'] = curr / total
+                        st.session_state['progress_text'] = f"Processing: {name} ({curr}/{total})"
+                    elif signal == WorkerSignals.STATUS:
+                        st.session_state['progress_text'] = data
+                    elif signal == WorkerSignals.DONE:
+                        st.session_state['progress_float'] = 1.0
+                        st.session_state['progress_text'] = "Done!"
+                        st.rerun()
+                    elif signal == WorkerSignals.ERROR:
+                        st.error(data)
+            except Exception:
+                pass
+
+            curr_progress = st.session_state.get('progress_float', 0.0)
+            curr_text = st.session_state.get('progress_text', "Processing (Background)...")
+            st.progress(curr_progress)
+            st.text(curr_text)
+            
+            # Suggest update but keep working
+            st.caption("⚠️ Install `streamlit>=1.37` for smoother animation.")
 
 # --- 4. ORCHESTRATION ---
 
