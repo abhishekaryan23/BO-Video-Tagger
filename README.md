@@ -13,7 +13,11 @@
 ### 2. Run as API Server (Backend)
 Start the headless FastAPI server.
 ```bash
+# Default (smart mode)
 uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+
+# With Configuration Overrides
+BO_MODEL_TIER=super BO_CACHE_DIR=/tmp/bo_cache uvicorn api:app ...
 ```
 -   **Docs**: `http://localhost:8000/docs`
 -   **Process**: `POST /process`
@@ -29,6 +33,19 @@ python bo_worker.py --dir "/path/to/media" --workers 2 --mode smart
 -   `--mode`: `smart` (fast) or `super` (accurate).
 
 ---
+---
+
+## 🔧 Configuration
+The application is fully configurable via `bo_config.py` or Environment Variables.
+
+| Environment Variable | Default | Description |
+| :--- | :--- | :--- |
+| `BO_CACHE_DIR` | `~/.cache/bo_video_tagger` | Location for DB, models, and logs. |
+| `BO_MODEL_TIER` | `smart` | AI Model Mode: `smart` (fast, Q8) or `super` (accurate, F16). |
+| `BO_DEBUG` | `False` | Enable verbose debug logging. |
+
+For advanced tuning (Model IDs, Search Weights, etc.), edit `bo_config.py` directly.
+
 ---
 
 # BO Video Tagger API Features Map
