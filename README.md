@@ -1,95 +1,108 @@
-<div align="center">
-  <img src="assets/logo.png" alt="BO Video Tagger Logo" width="200" />
-  <h1>BO Video Tagger (v2.0)</h1>
-  <p><strong>Your Local-First Video Intelligence Asset Manager.</strong></p>
-</div>
+![BO Video Tagger Logo](assets/logo.png)
+
+# BO Video Tagger (v2.0)
+**Your Local-First Video Intelligence Asset Manager.**
 
 ---
+## 🚀 Getting Started
 
-### The Problem
-You have terabytes of video footage. 
-You know you filmed a "drone shot of a forest at sunset" three years ago. 
-But finding it involves manually scrubbing through hundreds of files named `DJI_0049.MOV` or `C0012.MP4`.
+### 1. Requirements
+-   **System**: MacOS (Apple Silicon recommended) or Linux with NVIDIA GPU.
+-   **Deps**: Python 3.10+, ffmpeg.
 
-### The Solution
-**BO Video Tagger** watches your videos so you don't have to. 
-It creates a searchable, intelligent index of your entire library—tags, descriptions, and summaries—saved locally on your machine.
-
-No cloud uploads. No monthly fees. Just you, your data, and an AI that works for you.
-
----
-
-## 🎯 Who Is This For?
-
-| Role | Why You Need This |
-| :--- | :--- |
-| **Video Editors** | Find b-roll instantly. Search for "happy couple laughing" and drag it into your timeline. |
-| **Archivists** | Standardize metadata across decades of footage without lifting a finger. |
-| **Content Creators** | Repurpose old content. Ask your library: *"Show me all clips discussing AI from 2023."* |
-| **Data Hoarders** | Finally understand what's actually taking up space on your NAS. |
-
----
-
-## 🚀 Performance
-Speed matters. We built the **Titanium Engine** to respect your time and your hardware.
-
-![Performance Chart](assets/performance_chart.png)
-
--   **O(1) Smart Skip**: Re-scanning a 10TB library takes seconds. We only process new files.
--   **Local Acceleration**: Optimized for Apple Silicon (Metal) and NVIDIA GPUs (CUDA).
--   **Zero Latency Search**: 100k+ assets? Search results appear in <50ms thanks to FTS5 SQLite indexing.
-
----
-
-## 🛠 Features
-
-### 🧠 **Local Intelligence**
-Running on **SmolVLM2**, the tagger understands visual context, text on screen (OCR), and complex actions. It doesn't just see "dog"; it sees "Golden Retriever catching a frisbee in a park."
-
-### ⚡ **Control Deck**
-You have full control over the indexing process.
--   **Tier Selection**: Choose `Smart` (Speed) or `Super` (Precision) models.
--   **Force Reprocess**: One-click re-indexing for updated models.
--   **Live Analytics**: Monitor health, storage usage, and tag density in real-time.
-
-### 🔒 **Privacy by Design**
--   **100% Offline**: Unplug your ethernet cable. It still works.
--   **Verifiable Integrity**: All models are SHA256 checksummed before execution.
-
----
-
-## 🖼 Interface
-**Clean. Dark. Data-Dense.**
-
-### Library
-*Filter, Search, and Inspect.*
-![Library View](assets/library_blurred.png)
-
-### Analytics
-*Know your data.*
-![Analytics Dashboard](assets/analytics_blurred.png)
-
----
-
-## ⚙️ Quick Start
-
-**1. Install**
+### 2. Run as API Server (Backend)
+Start the headless FastAPI server.
 ```bash
-git clone https://github.com/abhishekaryan23/BO-Video-Tagger.git
-cd BO-Video-Tagger
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+uvicorn api:app --host 0.0.0.0 --port 8000 --reload
 ```
+-   **Docs**: `http://localhost:8000/docs`
+-   **Process**: `POST /process`
+-   **Search**: `GET /search?q=...`
 
-**2. Launch**
+### 3. Run Batch Worker (CLI)
+Process a folder of media files directly from the terminal.
 ```bash
-streamlit run app.py
+python bo_worker.py --dir "/path/to/media" --workers 2 --mode smart
 ```
+-   `--dir`: Folder to scan recursively.
+-   `--workers`: Parallel processing threads (beware VRAM usage).
+-   `--mode`: `smart` (fast) or `super` (accurate).
 
-**3. Index**
-Point the sidebar to your footage folder (e.g., `/Users/studio/Footage`) and click **Start Indexing**.
+---
+---
+
+# BO Video Tagger API Features Map
+
+## 1. Core Endpoints
+
+### ⚙️ Process Media
+**Endpoint**: `POST /process`
+**Description**: Triggers the AI pipeline for a single file. Indexing is performed synchronously (blocking) to ensure immediate availability, though concurrent requests are handled via thread pooling.
+**Features**:
+-   **Smart Skipping**: Checks database first; skips if file usage hasn't changed (unless `force_reprocess: true`).
+-   **Multi-Model Analysis**:
+    -   **Vision**: Uses `SmolVLM2` to generate dense visual descriptions and tags.
+    -   **Audio**: Uses `Faster-Whisper` for automatic speech recognition (ASR) / transcription.
+    -   **Vector Auth**: Generates 384-d semantic vectors (`all-MiniLM-L6-v2`) for search.
+-   **Automatic Metadata**: Extracts duration, resolution, size, and timestamp.
+
+### 🔍 Search Media
+**Endpoint**: `GET /search`
+**Description**: Performs a Hybrid Search combining keyword matching and semantic understanding.
+**Features**:
+-   **Hybrid Logic**:
+    -   **Full-Text Search (FTS5)**: Specific keyword matching against Tags, Summary, Description, and *Transcription*.
+    -   **Semantic Search**: (If configured) Vector similarity search to find concepts even without exact keywords (e.g. "dog" finds "puppy").
+-   **Scoring**: Result candidates are ranked by relevance score.
+-   **Filtering**: Optional `media_type` filter (video/image).
+
+### 📂 List Media (Library)
+**Endpoint**: `GET /media`
+**Description**: The "Library View". Retrieves paginated, sorted, and filtered lists of assets.
+**Features**:
+-   **Pagination**: standard `limit` & `offset`. Returns `X-Total-Count` headers.
+-   **Sorting**:
+    -   `date_desc` / `date_asc` (Time)
+    -   `duration_desc` / `duration_asc` (Length)
+-   **Filtering**:
+    -   `tag`: Exact substring match on tags.
+    -   `media_type`: `video` or `image`.
+    -   `date_from` / `date_to`: ISO date range filtering.
+
+### 🩺 Health Check
+**Endpoint**: `GET /health`
+**Description**: System status ping.
 
 ---
 
-*Engineered with precision by the BO Video Tagger Team.*
+## 2. Data Models (Schemas)
+
+### `MediaItem`
+The central object returned by most endpoints.
+-   **`meta`**: File stats (path, size, duration, resolution).
+-   **`ai`**: Generated intelligence.
+    -   `description`: Full paragraph description.
+    -   `summary`: One-line tl;dr.
+    -   `tags`: List of keywords.
+-   **`transcription`**:
+    -   `full_text`: Complete speech transcript.
+    -   `language`: Detected language (e.g. 'en').
+-   **`media_type`**: `video` | `image`.
+
+### `ErrorResponse` (RFC 7807)
+Standardized error reporting for all 4xx/5xx responses.
+-   `type`, `title`, `status`, `detail`, `instance`.
+
+---
+
+## 3. Underlying Capabilities
+
+### Database (SQLite + FTS5)
+-   **WAL Mode**: Enabled for high concurrency (writers don't block readers).
+-   **FTS5**: Virtual table backend for instant text search over millions of rows.
+-   **Vector Cache**: In-memory numpy cache for fast cosine similarity updates.
+
+### AI Engine (Processor)
+-   **Lazy Loading**: Models are loaded only when needed to save RAM.
+-   **GPU Acceleration**: Metal (MPS) / CUDA support detected automatically.
+-   **Fallback**: Robust error handling for corrupt files or undecodable audio.

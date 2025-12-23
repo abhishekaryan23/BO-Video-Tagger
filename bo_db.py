@@ -2,27 +2,32 @@ import sqlite3
 import json
 import os
 import logging
+import numpy as np
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 from pathlib import Path
+import weakref
 
 # Configure Logger
-from bo_config import Settings, configure_logging
+from bo_config import settings, configure_logging
+from schemas import MediaItem, MediaType, MediaMetadata, AIResponse, TranscriptionData, SearchResponse
 
 # Ensure logging is configured when DB is imported
 configure_logging()
 logger = logging.getLogger("VideoDB")
 
-import weakref
-
 class VideoDB:
     def __init__(self, db_path: str = None):
-        target_path = db_path or Settings.DB_PATH
+        target_path = db_path or settings.DB_PATH
         self.conn = sqlite3.connect(target_path, check_same_thread=False, timeout=30.0)
         self.conn.row_factory = sqlite3.Row
         self._init_db()
         # Ensure connection is closed when object is garbage collected
         self._finalizer = weakref.finalize(self, self.conn.close)
+
+        # Cache for Vector Search
+        self._vector_cache: Dict[str, np.ndarray] = {}
+        self._load_vector_cache()
 
     def __enter__(self):
         return self
@@ -36,9 +41,9 @@ class VideoDB:
         
         # ENABLE WAL MODE for Concurrency (Writer doesn't block Reader)
         cursor.execute("PRAGMA journal_mode=WAL;")
-        cursor.execute("PRAGMA synchronous=NORMAL;") # Faster writes, slightly less safe on power loss
+        cursor.execute("PRAGMA synchronous=NORMAL;") 
         
-        # Main Videos Table
+        # Main Videos Table (Now General Media Table)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS videos (
                 path TEXT PRIMARY KEY,
@@ -51,197 +56,347 @@ class VideoDB:
                 description TEXT,
                 metadata JSON,
                 processed_at DATETIME,
-                parent_folder TEXT
+                parent_folder TEXT,
+                media_type TEXT DEFAULT 'video',
+                transcription TEXT,
+                embedding BLOB
             )
         ''')
 
-        # Schema Migration: Add parent_folder if missing (Safe Lazy Migration)
-        cursor.execute("PRAGMA table_info(videos)")
-        columns = [row['name'] for row in cursor.fetchall()]
-        if 'parent_folder' not in columns:
-            try:
-                logger.info("⚡ Migrating Schema: Adding parent_folder column...")
-                cursor.execute("BEGIN IMMEDIATE")
-                cursor.execute("ALTER TABLE videos ADD COLUMN parent_folder TEXT")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_parent_folder ON videos(parent_folder)")
-                self.conn.commit()
-                
-                # Backfill existing records
-                logger.info("🔄 Backfilling parent_folder for existing records...")
-                cursor.execute("SELECT path FROM videos WHERE parent_folder IS NULL")
-                rows = cursor.fetchall()
-                if rows:
-                    updates = [(os.path.basename(os.path.dirname(row[0])), row[0]) for row in rows]
-                    cursor.executemany("UPDATE videos SET parent_folder = ? WHERE path = ?", updates)
-                    self.conn.commit()
-                    logger.info(f"✅ Backfilled {len(updates)} records.")
-            except Exception as e:
-                logger.error(f"Schema Migration Failed: {e}")
-                self.conn.rollback()
+        # Schema Migration
+        self._migrate_schema(cursor)
         
         # Full Text Search Index (FTS5)
         try:
-            cursor.execute('CREATE VIRTUAL TABLE IF NOT EXISTS videos_search USING fts5(path, filename, tags, summary, description)')
+            cursor.execute('CREATE VIRTUAL TABLE IF NOT EXISTS videos_search USING fts5(path, filename, tags, summary, description, transcription)')
             self.has_fts = True
         except sqlite3.OperationalError:
             logger.warning("FTS5 extension not available. Falling back to standard LIKE search.")
             self.has_fts = False
         
-        # Performance Index for Gallery Sorting
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_videos_processed_at ON videos(processed_at);")
+        # Performance Index
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_processed_at ON videos(processed_at);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_media_type ON videos(media_type);")
 
         self.conn.commit()
 
-    def upsert_video(self, data: Dict[str, Any]):
-        """Insert or Update a video record."""
-        meta = data.get("meta", {})
-        ai = data.get("ai", {})
-        system = data.get("system", {})
+    def _migrate_schema(self, cursor):
+        """Hands schema updates gracefully."""
+        cursor.execute("PRAGMA table_info(videos)")
+        columns = {row['name'] for row in cursor.fetchall()}
         
-        path = meta.get("path")
+        # 1. Parent Folder
+        if 'parent_folder' not in columns:
+            self._add_column(cursor, "parent_folder", "TEXT")
+            
+        # 2. Media Type
+        if 'media_type' not in columns:
+            self._add_column(cursor, "media_type", "TEXT DEFAULT 'video'")
+            
+        # 3. Transcription
+        if 'transcription' not in columns:
+            self._add_column(cursor, "transcription", "TEXT")
+            
+        if 'embedding' not in columns:
+            self._add_column(cursor, "embedding", "BLOB")
+            
+        # 5. Fix FTS Schema if needed
+        # FTS5 tables are virtual and harder to alter. If 'transcription' is missing, likely old schema.
+        try:
+            cursor.execute("PRAGMA table_info(videos_search)")
+            fts_columns = {row['name'] for row in cursor.fetchall()}
+            if fts_columns and 'transcription' not in fts_columns:
+                logger.warning("⚡ Migrating FTS Schema: Recreating videos_search with transcription support...")
+                cursor.execute("DROP TABLE IF EXISTS videos_search")
+                cursor.execute('CREATE VIRTUAL TABLE videos_search USING fts5(path, filename, tags, summary, description, transcription)')
+                # Backfill
+                cursor.execute('''
+                    INSERT INTO videos_search(path, filename, tags, summary, description, transcription)
+                    SELECT path, filename, tags, summary, description, transcription FROM videos
+                ''')
+                logger.info("✅ FTS Migration complete.")
+        except Exception as e:
+            logger.warning(f"FTS Migration check failed (ignoring): {e}")
+        if 'embedding' not in columns:
+            self._add_column(cursor, "embedding", "BLOB")
+
+    def _add_column(self, cursor, col_name, col_type):
+        try:
+            logger.info(f"⚡ Migrating Schema: Adding {col_name}...")
+            cursor.execute(f"ALTER TABLE videos ADD COLUMN {col_name} {col_type}")
+        except Exception as e:
+            logger.warning(f"Column {col_name} might already exist: {e}")
+
+    def _load_vector_cache(self):
+        """Loads all vectors into memory for fast search."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT path, embedding FROM videos WHERE embedding IS NOT NULL")
+            count = 0
+            for row in cursor.fetchall():
+                path, blob = row
+                if blob:
+                    # Convert bytes back to numpy array
+                    vec = np.frombuffer(blob, dtype=np.float32)
+                    self._vector_cache[path] = vec
+                    count += 1
+            logger.info(f"🧠 Loaded {count} vectors into memory cache.")
+        except Exception as e:
+            logger.error(f"Failed to load vector cache: {e}")
+
+    def upsert_media(self, item: MediaItem, embedding_bytes: Optional[bytes] = None):
+        """Insert or Update a media record."""
+        path = item.meta.path
         if not path:
             return
 
-        filename = meta.get("file", os.path.basename(path))
-        size_mb = meta.get("size_mb", 0.0)
-        duration = meta.get("duration_sec", 0.0)
-        resolution = meta.get("resolution", "Unknown")
+        # Prepare Data
+        tags_str = ",".join(item.ai.tags) if item.ai else ""
+        summary = item.ai.summary if item.ai else ""
+        description = item.ai.description if item.ai else ""
         
-        tags = ",".join(ai.get("tags", []))
-        summary = ai.get("summary", "")
-        description = ai.get("description", "")
-        processed_at = system.get("timestamp", datetime.now().isoformat())
-        parent_folder = os.path.basename(os.path.dirname(path))
-
+        transcription_text = item.transcription.full_text if item.transcription else ""
+        
+        # Serialize full object to JSON for 'metadata' column
+        json_data = item.model_dump_json()
+        
+        # Timestamp
+        processed_at = item.system.timestamp.isoformat() if item.system else datetime.now().isoformat()
+        
         cursor = self.conn.cursor()
         
         try:
             # 1. Update Main Table
             cursor.execute('''
-                INSERT INTO videos (path, filename, size_mb, duration_sec, resolution, tags, summary, description, metadata, processed_at, parent_folder)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO videos (
+                    path, filename, size_mb, duration_sec, resolution, 
+                    tags, summary, description, metadata, processed_at, parent_folder,
+                    media_type, transcription, embedding
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     tags=excluded.tags,
                     summary=excluded.summary,
                     description=excluded.description,
                     metadata=excluded.metadata,
                     processed_at=excluded.processed_at,
-                    parent_folder=excluded.parent_folder
-            ''', (path, filename, size_mb, duration, resolution, tags, summary, description, json.dumps(data), processed_at, parent_folder))
+                    parent_folder=excluded.parent_folder,
+                    transcription=excluded.transcription,
+                    embedding=excluded.embedding,
+                    media_type=excluded.media_type
+            ''', (
+                path, item.meta.filename, item.meta.size_mb, item.meta.duration_sec, item.meta.resolution,
+                tags_str, summary, description, json_data, processed_at, item.meta.parent_folder,
+                item.media_type.value, transcription_text, embedding_bytes
+            ))
             
-            # 2. Update Search Index (if FTS enabled)
+            # 2. Update Search Index
             if self.has_fts:
+                # Combine all text fields for FTS
+                full_search_text = f"{tags_str} {summary} {description} {transcription_text}"
                 cursor.execute('DELETE FROM videos_search WHERE path = ?', (path,))
                 cursor.execute('''
-                    INSERT INTO videos_search (path, filename, tags, summary, description)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (path, filename, tags, summary, description))
+                    INSERT INTO videos_search (path, filename, tags, summary, description, transcription)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (path, item.meta.filename, tags_str, summary, description, transcription_text))
 
             self.conn.commit()
+            
+            # 3. Update In-Memory Vector Cache
+            if embedding_bytes:
+                vec = np.frombuffer(embedding_bytes, dtype=np.float32)
+                self._vector_cache[path] = vec
+                
         except Exception as e:
             logger.error(f"DB Insert Error: {e}")
             self.conn.rollback()
 
-    def get_all_videos(self, limit: int = 100, offset: int = 0, folder_filter: str = None) -> List[dict]:
-        """Retrieve videos, optionally filtered by folder."""
+    def get_all_media(
+        self, 
+        limit: int = 50, 
+        offset: int = 0, 
+        media_type: str = "all",
+        sort_by: str = "date_desc",
+        tag: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None
+    ) -> List[MediaItem]:
+        """
+        Retrieve media items with advanced filtering and sorting.
+        sort_by: date_asc, date_desc, duration_asc, duration_desc
+        """
         cursor = self.conn.cursor()
         
-        if folder_filter and folder_filter != "All":
-            cursor.execute('''
-                SELECT * FROM videos 
-                WHERE path LIKE ? 
-                ORDER BY processed_at DESC LIMIT ? OFFSET ?
-            ''', (f"%{folder_filter}%", limit, offset))
-        else:
-            cursor.execute('SELECT * FROM videos ORDER BY processed_at DESC LIMIT ? OFFSET ?', (limit, offset))
+        query = "SELECT metadata FROM videos WHERE 1=1"
+        params = []
+        
+        # 1. Filters
+        if media_type != "all":
+            query += " AND media_type = ?"
+            params.append(media_type)
             
-        return [dict(row) for row in cursor.fetchall()]
+        if tag:
+            query += " AND tags LIKE ?"
+            params.append(f"%{tag}%")
+            
+        if date_from:
+            query += " AND processed_at >= ?"
+            params.append(date_from)
+            
+        if date_to:
+            query += " AND processed_at <= ?"
+            params.append(date_to)
 
-    def get_unique_folders(self) -> List[str]:
-        """Returns a list of distinct parent folders (Optimized)."""
+        # 2. Sorting
+        if sort_by == "date_asc":
+            query += " ORDER BY processed_at ASC"
+        elif sort_by == "duration_desc":
+            query += " ORDER BY duration_sec DESC"
+        elif sort_by == "duration_asc":
+            query += " ORDER BY duration_sec ASC"
+        else: # Default: date_desc
+            query += " ORDER BY processed_at DESC"
+            
+        # 3. Pagination
+        query += " LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        
+        # Execute
+        cursor.execute(query, params)
+        
+        items = []
+        for row in cursor.fetchall():
+            try:
+                data = json.loads(row[0])
+                items.append(MediaItem(**data))
+            except Exception:
+                continue
+        return items
+
+    def get_total_count(self, media_type: str = "all", tag: Optional[str] = None) -> int:
+        """Get total count for pagination headers."""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT DISTINCT parent_folder FROM videos WHERE parent_folder IS NOT NULL ORDER BY parent_folder") 
-        return [row[0] for row in cursor.fetchall()]
+        query = "SELECT COUNT(*) FROM videos WHERE 1=1"
+        params = []
+        
+        if media_type != "all":
+            query += " AND media_type = ?"
+            params.append(media_type)
+        
+        if tag:
+            query += " AND tags LIKE ?"
+            params.append(f"%{tag}%")
+            
+        cursor.execute(query, params)
+        return cursor.fetchone()[0]
+
+    def get_media(self, path: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a specific media item (raw dict) by path for check."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT * FROM videos WHERE path = ?", (path,))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+        except Exception:
+            # logger.error(f"Failed to get media path: {e}") 
+            return None
+
+    def search_media(self, query: str, query_vector: Optional[np.ndarray] = None, limit: int = 50) -> List[SearchResponse]:
+        """Hybrid Search: FTS + Vector Cosine Similarity."""
+        # 1. FTS Search (Keyword Match)
+        fts_paths = set()
+        fts_scores = {}
+        
+        if self.has_fts and query:
+            cursor = self.conn.cursor()
+            fts_query = f"{query}*" 
+            try:
+                # Use FTS rank if possible, or simple match
+                cursor.execute('''
+                    SELECT path, -rank as score 
+                    FROM videos_search 
+                    WHERE videos_search MATCH ? 
+                    ORDER BY rank LIMIT ?
+                ''', (fts_query, limit))
+                
+                for row in cursor.fetchall():
+                    fts_paths.add(row[0])
+                    fts_scores[row[0]] = 1.0  # Base score for keyword match
+            except Exception:
+                pass
+
+        # 2. Vector Search (Semantic)
+        vec_scores = {}
+        if query_vector is not None and self._vector_cache:
+            # Normalize query
+            norm_q = np.linalg.norm(query_vector)
+            if norm_q > 0:
+                q_unit = query_vector / norm_q
+                
+                # Bulk Compute: Matrix Multiplication
+                # Keys and Values lists
+                paths = list(self._vector_cache.keys())
+                vectors = list(self._vector_cache.values())
+               
+                if vectors:
+                    # Stack: (N, D)
+                    matrix = np.stack(vectors)
+                    # Normalize Matrix (Pre-normalized in service usually, but let's be safe)
+                    # Assuming stored vectors are normalized... check embedding.py (yes they are)
+                    
+                    # Dot Product: (N, D) @ (D,) -> (N,)
+                    sims = matrix @ q_unit
+                    
+                    # Filter top K
+                    # Get indices of top limit
+                    if len(sims) > limit:
+                        # argpartition is faster than sort
+                        top_indices = np.argpartition(sims, -limit)[-limit:]
+                    else:
+                        top_indices = np.arange(len(sims))
+                        
+                    for idx in top_indices:
+                        score = float(sims[idx])
+                        if score > settings.SEARCH_CUTOFF: # Metadata cutoff
+                            path = paths[idx]
+                            vec_scores[path] = score
+
+        # 3. Merge & Rank
+        all_paths = fts_paths.union(vec_scores.keys())
+        results = []
+        
+        for path in all_paths:
+            # Hybrid Score (Adjustable via Config)
+            s_fts = fts_scores.get(path, 0.0)
+            s_vec = vec_scores.get(path, 0.0)
+            
+            final_score = (s_fts * settings.SEARCH_FTS_WEIGHT) + (s_vec * settings.SEARCH_VEC_WEIGHT)
+            
+            # Fetch Metadata (Light fetch)
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT filename, summary, tags, media_type FROM videos WHERE path = ?", (path,))
+            row = cursor.fetchone()
+            if row:
+                results.append(SearchResponse(
+                    filename=row[0],
+                    path=path,
+                    score=round(final_score, 3),
+                    media_type=row[3],
+                    summary=row[1] or "",
+                    tags=row[2].split(",") if row[2] else []
+                ))
+
+        # Sort by Final Score
+        results.sort(key=lambda x: x.score, reverse=True)
+        return results[:limit]
 
     def get_all_file_paths_set(self) -> set:
         """Returns a set of all indexed file paths for O(1) lookups."""
         cursor = self.conn.cursor()
         cursor.execute("SELECT path FROM videos")
         return {row[0] for row in cursor.fetchall()}
-
-    def search_videos(self, query: str) -> List[dict]:
-        """Search videos using FTS or LIKE."""
-        cursor = self.conn.cursor()
-        
-        if self.has_fts:
-            fts_query = f"{query}*" 
-            try:
-                cursor.execute('''
-                    SELECT v.* FROM videos v
-                    JOIN videos_search s ON v.path = s.path
-                    WHERE s.videos_search MATCH ?
-                    ORDER BY rank
-                ''', (fts_query,))
-            except sqlite3.OperationalError:
-                return self._search_like(query)
-        else:
-            return self._search_like(query)
-            
-        return [dict(row) for row in cursor.fetchall()]
-    
-    def _search_like(self, query: str) -> List[dict]:
-        """Fallback search using LIKE."""
-        cursor = self.conn.cursor()
-        param = f"%{query}%"
-        cursor.execute('''
-            SELECT * FROM videos 
-            WHERE filename LIKE ? OR tags LIKE ? OR summary LIKE ? OR description LIKE ?
-        ''', (param, param, param, param))
-        return [dict(row) for row in cursor.fetchall()]
-
-    def update_metadata(self, path: str, description: str, tags: List[str]):
-        """Update description and tags from UI Editor."""
-        cursor = self.conn.cursor()
-        
-        try:
-            cursor.execute('SELECT metadata FROM videos WHERE path = ?', (path,))
-            row = cursor.fetchone()
-            if not row:
-                return
-                
-            full_data = json.loads(row['metadata'])
-            full_data['ai']['description'] = description
-            full_data['ai']['tags'] = tags
-            
-            tags_str = ",".join(tags)
-            
-            cursor.execute('''
-                UPDATE videos 
-                SET description = ?, tags = ?, metadata = ?
-                WHERE path = ?
-            ''', (description, tags_str, json.dumps(full_data), path))
-            
-            if self.has_fts:
-                cursor.execute('DELETE FROM videos_search WHERE path = ?', (path,))
-                cursor.execute('''
-                    INSERT INTO videos_search (path, filename, tags, summary, description)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (path, os.path.basename(path), tags_str, full_data['ai'].get('summary', ''), description))
-                
-            self.conn.commit()
-        except Exception as e:
-            logger.error(f"Metadata Update Error: {e}")
-            self.conn.rollback()
-
-    def get_analytics_df(self):
-        """Fetch DataFrame for analytics (Memory Optimized)."""
-        import pandas as pd
-        
-        query = '''
-            SELECT path, size_mb, duration_sec, tags, processed_at, metadata 
-            FROM videos
-        '''
-        return pd.read_sql_query(query, self.conn)
 
     def close(self):
         self.conn.close()
@@ -262,9 +417,22 @@ class VideoDB:
                         if not line: continue
                         try:
                             record = json.loads(line)
-                            self.upsert_video(record)
-                        except json.JSONDecodeError:
-                            logger.error(f"Skipping invalid JSON line in {file}")
+                            # Adapt Legacy Dict to MediaItem
+                            try:
+                                item = MediaItem(**record)
+                            except Exception:
+                                # Best effort adaptation
+                                item = MediaItem(
+                                    media_type=MediaType.VIDEO, # Assume video for legacy
+                                    meta=MediaMetadata(**record.get('meta', {})),
+                                    ai=AIResponse(**record.get('ai', {})),
+                                    system=None
+                                )
+                                
+                            self.upsert_media(item)
+                            
+                        except Exception as e:
+                            logger.error(f"Skipping invalid record in {file}: {e}")
                 
                 # Rename after successful import
                 file.rename(file.with_suffix('.jsonl.bak'))
@@ -272,3 +440,4 @@ class VideoDB:
                 
             except Exception as e:
                 logger.error(f"Failed to migrate {file}: {e}")
+
