@@ -43,8 +43,26 @@ The application is fully configurable via `bo_config.py` or Environment Variable
 | `BO_CACHE_DIR` | `~/.cache/bo_video_tagger` | Location for DB, models, and logs. |
 | `BO_MODEL_TIER` | `smart` | AI Model Mode: `smart` (fast, Q8) or `super` (accurate, F16). |
 | `BO_DEBUG` | `False` | Enable verbose debug logging. |
+| `MAX_CONCURRENT_JOBS` | `1` | Max simultaneous heavy processing jobs (Semaphores). |
 
 For advanced tuning (Model IDs, Search Weights, etc.), edit `bo_config.py` directly.
+
+---
+
+## 🔌 Connection Guide (n8n / Docker)
+If you are running n8n in a Docker container on the same machine, use these settings:
+
+### 1. Networking
+*   **Base URL**: `http://host.docker.internal:8000`
+    *   *Why?* `localhost` inside Docker refers to the container itself. `host.docker.internal` points to your Mac/PC where the API is running.
+
+### 2. File Paths (Crucial!)
+The API runs on your **Host Machine**, not inside the Docker container.
+*   **Correct Payload**:
+    ```json
+    { "path": "/Users/abhishekrai/Downloads/video.mp4" }
+    ```
+    *(This path must exist on your Mac, so the API can read it)*
 
 ---
 

@@ -79,6 +79,7 @@ class SearchResponse(BaseModel):
     score: float
     media_type: MediaType
     summary: str
+    description: Optional[str] = None # Full text without truncation
     tags: List[str]
     thumbnail_path: Optional[str] = None
 

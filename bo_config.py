@@ -75,10 +75,12 @@ class Settings:
     SEARCH_FTS_WEIGHT: float = 0.3   # Keyword Match Importance
     SEARCH_VEC_WEIGHT: float = 0.7   # Semantic Match Importance
     
-    SEARCH_CUTOFF: float = 0.25      # Minimum score to be considered a match
+    SEARCH_CUTOFF: float = 0.18      # Minimum score to be considered a match
 
     # =========================================================================
     # 🖥️ UI & Application Defaults
+    # =========================================================================
+    MAX_CONCURRENT_JOBS: int = 1     # Max parallel heavy processing jobs
     # =========================================================================
     GRID_COLUMNS: int = 5
     model_tier: str = "smart" # Default tier if not specified

@@ -29,6 +29,11 @@ import yake
 
 logger = logging.getLogger("Processor")
 
+# --- Custom Exceptions ---
+class ProcessingError(Exception):
+    """Raised when media processing fails with a known cause."""
+    pass
+
 # --- Configuration Constants (Can be moved to config) ---
 class MediaProcessor:
     def __init__(self, mode: str = "smart", device: str = None):
@@ -88,12 +93,17 @@ class MediaProcessor:
         """
         Main Pipeline Entrypoint.
         Returns: (MediaItem object, embedding_bytes)
+        Raises: ProcessingError, FileNotFoundError
         """
         if not os.path.exists(path):
-            return None
+            raise FileNotFoundError(f"File not found: {path}")
             
         start_time = time.time()
-        self.load_vlm() # Ensure loaded
+        
+        try:
+            self.load_vlm() # Ensure loaded
+        except Exception as e:
+            raise ProcessingError(f"Failed to load AI Model: {e}")
         
         # 1. Determine Type
         ext = os.path.splitext(path)[1].lower()
@@ -103,21 +113,30 @@ class MediaProcessor:
             media_type = MediaType.VIDEO
         else:
             logger.warning(f"Unsupported media type: {path}")
-            return None
+            raise ProcessingError(f"Unsupported file format: {ext}")
 
         logger.info(f"Processing {media_type.value.upper()}: {os.path.basename(path)}")
 
         try:
             # 2. Extract Metadata & Frames/Image
             if media_type == MediaType.VIDEO:
-                frames, meta = self._extract_video_frames(path)
-                transcription = self.transcriber.transcribe(path)
+                try:
+                    frames, meta = self._extract_video_frames(path)
+                    transcription = self.transcriber.transcribe(path)
+                except Exception as e:
+                    raise ProcessingError(f"Video Extraction Failed: {e}")
             else:
-                frames, meta = self._process_image(path)
-                transcription = None # No audio for images usually
+                try:
+                    frames, meta = self._process_image(path)
+                    transcription = None # No audio for images usually
+                except Exception as e:
+                    raise ProcessingError(f"Image Processing Failed: {e}")
             
             # 3. Visual Tagging (VLM)
-            ai_response = self._run_vlm_inference(frames, media_type)
+            try:
+                ai_response = self._run_vlm_inference(frames, media_type)
+            except Exception as e:
+                raise ProcessingError(f"AI Inference Failed: {e}")
             
             # 4. Construct Object
             item = MediaItem(
@@ -136,9 +155,11 @@ class MediaProcessor:
             
             return item, embedding_bytes
 
+        except ProcessingError:
+             raise
         except Exception as e:
-            logger.error(f"Error processing {path}: {e}")
-            return None
+            logger.error(f"Critical error processing {path}: {e}")
+            raise ProcessingError(f"Critical Failure: {str(e)}")
 
     def _extract_video_frames(self, path: str) -> tuple[List[str], MediaMetadata]:
         """Extracts frames for VLM and basic metadata."""

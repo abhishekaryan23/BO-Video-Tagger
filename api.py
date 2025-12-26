@@ -1,6 +1,7 @@
 import logging
 import time
 import os
+import asyncio
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
@@ -17,7 +18,7 @@ from schemas import (
     ErrorResponse
 )
 from bo_db import VideoDB
-from processor import MediaProcessor
+from processor import MediaProcessor, ProcessingError
 from bo_config import settings
 
 # Setup Logging
@@ -27,13 +28,18 @@ logger = logging.getLogger("API")
 # Global Services
 db: Optional[VideoDB] = None
 processor: Optional[MediaProcessor] = None
+semaphore: Optional[asyncio.Semaphore] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize resources on startup and clean up on shutdown."""
-    global db, processor
+    global db, processor, semaphore
     
     logger.info("🚀 Starting BO-Video-Tagger Backend...")
+    
+    # Initialize Concurrency Limit
+    semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_JOBS)
+    logger.info(f"🚦 Concurrency Limit set to: {settings.MAX_CONCURRENT_JOBS}")
     
     # Initialize DB
     db = VideoDB()
@@ -101,51 +107,59 @@ def health_check():
     return {"status": "ok", "timestamp": time.time()}
 
 @app.post("/process", response_model=MediaItem)
-def process_media(request: ProcessRequest, background_tasks: BackgroundTasks):
+async def process_media(request: ProcessRequest, background_tasks: BackgroundTasks):
     """
     Process a single media file (video or image).
-    Synchronous processing for now to ensure result return.
-    For long videos, we might want to move this to background tasks and return a job ID.
-    But requirement asks for 1TB/10h, which implies batch processing.
-    For this API, we allow blocking or async. 
-    Let's keep it blocking for simplicity of the return value for now, 
-    but the worker script can call this in parallel threads.
+    ASYNC + SEMAPHORE CONTROL:
+    Limits concurrent heavy processing jobs to avoid Server OOM.
     """
     if not processor or not db:
         raise HTTPException(status_code=503, detail="Services not initialized")
     
-    try:
-        # Check if exists and not forced
-        if not request.force_reprocess:
-            existing = db.get_media(request.path)
-            if existing: # This needs get_media to return MediaItem or logic for it
-                 # If we only have raw dict, we might need to convert. 
-                 # Current VideoDB.get_media returns dict properly formatted?
-                 # Let's assume re-processing is desired if called via /process
-                 pass 
+    # 1. Acquire Semaphore (Limit concurrent jobs)
+    # If limit reached, this will wait (non-blocking) until a slot opens.
+    # To fail fast instead, use semaphore.acquire() with timeout logic.
+    async with semaphore:    
+        try:
+            # Check if exists and not forced
+            if not request.force_reprocess:
+                # Need sync wrapper if db calls are blocking (they replay quickly though)
+                existing = db.get_media(request.path)
+                if existing:
+                     pass 
 
-        if not os.path.exists(request.path):
-             raise HTTPException(status_code=404, detail="File not found on server")
+            if not os.path.exists(request.path):
+                 raise HTTPException(status_code=404, detail="File not found on server")
 
-        logger.info(f"Processing request for: {request.path}")
-        
-        # Process It
-        result = processor.process_file(request.path)
-        if not result:
-             raise HTTPException(status_code=500, detail="Processing failed or file format unsupported")
-             
-        item, embedding_bytes = result
-        
-        # Save to DB
-        db.upsert_media(item, embedding_bytes)
-        
-        return item
-        
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="File not found")
-    except Exception as e:
-        logger.error(f"Processing failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+            logger.info(f"Processing request for: {request.path}")
+            
+            # 2. Run Heavy CPU Task in Threadpool
+            # "processor.process_file" is blocking. We offload it to keep heartbeat alive.
+            loop = asyncio.get_running_loop()
+            
+            # Run in default executor (threadpool)
+            result = await loop.run_in_executor(None, processor.process_file, request.path)
+            
+            if not result:
+                 raise HTTPException(status_code=500, detail="Processing failed or file format unsupported")
+                 
+            item, embedding_bytes = result
+            
+            # Save to DB (Blocking but fast-ish)
+            db.upsert_media(item, embedding_bytes)
+            
+            return item
+            
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="File not found")
+        except ProcessingError as e:
+            logger.warning(f"Bad Request: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Processing failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/search", response_model=List[SearchResponse])
 def search_media(

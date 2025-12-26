@@ -31,9 +31,13 @@ def process_single_file(processor: MediaProcessor, db: VideoDB, file_path: str, 
         
         item, embedding_bytes = processor.process_file(file_path)
         
-        # Save
-        db.upsert_media(item, embedding_bytes)
-        
+        # Save to DB
+        try:
+            db.upsert_media(item, embedding_bytes)
+        except Exception as e:
+            logger.error(f"❌ Failed to save {os.path.basename(file_path)} to DB: {e}")
+            # Continue to next file (Worker shouldn't crash just because DB failed for one)
+            
         duration = time.time() - start_time
         logger.info(f"Done: {file_path} ({duration:.2f}s)")
         

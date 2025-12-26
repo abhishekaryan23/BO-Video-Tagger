@@ -1,25 +1,21 @@
-# Core
+# Core API
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+requests>=2.30.0
+
+# AI & Processing
+numpy>=1.24.0
+opencv-python-headless>=4.10.0
+Pillow>=10.0.0
+yake>=0.4.8
+
+# AI Models
+faster-whisper>=1.0.0
+sentence-transformers>=3.0.0
+# Note: On Mac M1/M2, you may need CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python
+llama-cpp-python>=0.3.16
+huggingface-hub>=0.23.0
+
+# Utilities
 pydantic>=2.0.0
-numpy==2.2.6
-opencv-python-headless
-Pillow
-psutil==7.1.3
-tqdm==4.67.1
-yake==0.6.0
-
-# AI / ML
-llama-cpp-python==0.3.16
-huggingface_hub==1.2.3
-faster-whisper
-sentence-transformers
-torch; sys_platform != 'darwin'
-torch; sys_platform == 'darwin'
-
-# Testing
-pytest
-
-# Other existing packages (retained or updated)
-streamlit==1.52.2
-opencv-python==4.12.0.88
-pandas==2.3.3
-altair==6.0.0
+python-dotenv>=1.0.0

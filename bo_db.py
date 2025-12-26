@@ -165,6 +165,8 @@ class VideoDB:
         
         cursor = self.conn.cursor()
         
+        cursor = self.conn.cursor()
+        
         try:
             # 1. Update Main Table
             cursor.execute('''
@@ -210,6 +212,7 @@ class VideoDB:
         except Exception as e:
             logger.error(f"DB Insert Error: {e}")
             self.conn.rollback()
+            raise e # RE-RAISE so API knows it failed!
 
     def get_all_media(
         self, 
@@ -376,7 +379,7 @@ class VideoDB:
             
             # Fetch Metadata (Light fetch)
             cursor = self.conn.cursor()
-            cursor.execute("SELECT filename, summary, tags, media_type FROM videos WHERE path = ?", (path,))
+            cursor.execute("SELECT filename, summary, tags, media_type, description FROM videos WHERE path = ?", (path,))
             row = cursor.fetchone()
             if row:
                 results.append(SearchResponse(
@@ -385,6 +388,7 @@ class VideoDB:
                     score=round(final_score, 3),
                     media_type=row[3],
                     summary=row[1] or "",
+                    description=row[4] or "",
                     tags=row[2].split(",") if row[2] else []
                 ))
 
